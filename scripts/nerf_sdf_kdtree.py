@@ -285,7 +285,11 @@ def PC_POS_callback(PC_msg, POS_msg):
     elif(acos_arg < -1):
         acos_arg = -1
     #print(f"Argumento del arcocoseno: {asin_arg}")
-    if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > 0.5 or 360/np.pi*np.arccos(acos_arg) > 20):
+    dist_between_iter = 0.5 #meters
+    ang_between_iter = 20 #degrees
+    if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > dist_between_iter or 360/np.pi*np.arccos(acos_arg) > ang_between_iter):
+        print("x =", x_pos)
+        print("y =", y_pos)
         dist_dif = np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2)
         ang_dif = 360/np.pi*np.arccos(acos_arg)
         print("distance dif =", dist_dif)
@@ -423,7 +427,7 @@ def main():
 
     PC_sub = message_filters.Subscriber(topic_name_PC, PointCloud2)
     POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
-    ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=100000, slop=0.1)
+    ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=1000000, slop=0.1)
     ts.registerCallback(PC_POS_callback)
     # Subscribe to LiDAR data topic and Position/Orientation data topic
     #rospy.Subscriber(topic_name_PC, PointCloud2, PC_callback)
