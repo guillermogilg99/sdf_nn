@@ -56,13 +56,22 @@ class NeuralNetwork(nn.Module): # Se crea la red haciendo subclassing del nn.Mod
         super().__init__()
         self.flatten = nn.Flatten()
         self.linear_softplus_stack = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.Dropout(0.5),
+            #nn.Linear(3, 64),
+            #nn.Dropout(0.5),
+            #nn.Softplus(),
+            #nn.Linear(64, 64),
+            #nn.Dropout(0.5),
+            #nn.Softplus(),
+            #nn.Linear(64, 1),
+            nn.Linear(3, 256),
             nn.Softplus(),
-            nn.Linear(64, 64),
-            nn.Dropout(0.5),
+            nn.Linear(256, 256),
             nn.Softplus(),
-            nn.Linear(64, 1),
+            nn.Linear(256, 256),
+            nn.Softplus(),
+            nn.Linear(256, 256),
+            nn.Softplus(),
+            nn.Linear(256, 1)
         )
 
     def forward(self, x): # Se implementan las operaciones sobre los datos de entrada en el forward
@@ -97,177 +106,25 @@ def RotQuad(Q): #Puede estar al revés (comprobar)
     r20 = 2 * (q1 * q3 - q0 * q2)
     r21 = 2 * (q2 * q3 + q0 * q1)
     r22 = 2 * (q0 * q0 + q3 * q3) - 1
-     
+    
     # 3x3 rotation matrix
     rot_matrix = np.array([[r00, r01, r02],
                            [r10, r11, r12],
                            [r20, r21, r22]])
-                            
+
     return rot_matrix
-
-PC_counter = 0
-# Callback function to process messages
-def PC_callback(msg):
-    print("Pointcloud message")
-    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points, PC_counter
-    #print(f"q0 = {Q[0]}, q1 = {Q[1]}, q2 = {Q[2]}, q3 = {Q[3]} || q0last = {Q_last[0]}, q1last = {Q_last[1]}, q2last = {Q_last[2]}, q3last = {Q_last[3]}")
-    acos_arg = np.abs(Q[0]*Q_last[0]+Q[1]*Q_last[1]+Q[2]*Q_last[2]+Q[3]*Q_last[3])
-    if(acos_arg > 1):
-        acos_arg = 1
-    elif(acos_arg < -1):
-        acos_arg = -1
-    #print(f"Argumento del arcocoseno: {asin_arg}")
-    if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > 0.5 or 360/np.pi*np.arccos(acos_arg) > 20):
-        dist_dif = np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2)
-        ang_dif = 360/np.pi*np.arccos(acos_arg)
-        print("distance dif =", dist_dif)
-        print("angle dif =", ang_dif)
-        R = RotQuad(Q) #Matriz de rotación del dron
-        x_last = x_pos
-        y_last = y_pos
-        z_last = z_pos
-        Q_last = Q
-        drone_pos = np.array([x_pos, y_pos, z_pos])
-        pointcount = 0 #Contador de puntos detectados por el LiDAR
-        wall_coordinates = np.empty((0,3)) #Para guardar los puntos con SDF=0 (paredes de objetos)
-        #training_points = np.empty((0,4)) #Para guardar los puntos para entrenar la NeRF
-        for p in pc2.read_points(msg, field_names = ("x", "y", "z"), skip_nans=True):
-            #Move to global coordinates
-            plocal = np.array([p[0], p[1], p[2]])
-            pglobal = drone_pos + R @ plocal
-            wall_coordinates =np.append(wall_coordinates, [pglobal], axis=0)
-            total_wall_point_list = np.append(total_wall_point_list, [pglobal], axis=0)
-            #print(" x : %f  y: %f  z: %f" %(pglobal[0],pglobal[1],pglobal[2]))
-            pointcount = pointcount + 1
-
-        #------------------Choose random wall points for the training------------------
-        num_samples_wallpoints = pointcount #Wall points to be considered (from 0 to pointcount)
-        rnd_samples1 = np.random.choice(range(0, pointcount), num_samples_wallpoints, replace=False)
-        for k in rnd_samples1:
-            new_tp = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2], 0])
-            saved_points = np.append(saved_points,[new_tp], axis=0)
-            #training_points = np.append(training_points, [new_tp], axis=0)
-            taken_wall_points = np.append(taken_wall_points, [new_tp], axis=0)
-
-        #Create the kdTree for the next step
-        pkdtree = cKDTree(total_wall_point_list)
-
-        #--------Choose and estimate the sdf of points outside of the wall for training--------
-        cont_lidar = cont_lidar + 1 # Add 1 to the counter (if multiple of 10, save points for continuous training)
-        num_samp_ray = pointcount // 2 #LiDAR rays to be considered
-        points_per_ray = 20 #Points in every LiDAR ray considered
-        rnd_ray = np.random.choice(range(0, pointcount), num_samp_ray, replace=False) # Takes random samples of available rays
-        for k in rnd_ray: #For each ray
-            wall_point = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2]]) #This is the wall point of that ray
-            for l in range(1,points_per_ray + 1): #For each point per ray
-                void_point = drone_pos + (wall_point-drone_pos)*random.uniform() # Coge puntos aleatorios a lo largo del rayo
-                p_sdf_estimado, point_index = pkdtree.query(void_point)
-                new_tp = np.array([void_point[0], void_point[1], void_point[2], p_sdf_estimado])
-                saved_points = np.append(saved_points,[new_tp], axis=0)
-                #print(new_tp)
-                #training_points = np.append(training_points,[new_tp], axis=0)
-        #print("Done")
-
-        #training_points = np.append(training_points,saved_points,axis=0) # Add the general points
-        
-        #-----------Training Process-----------
-        # Define hyperparameters
-        learning_rate = 0.002
-        num_epochs = 40
-
-        # Initialize loss function and optimizer
-        #criterion = nn.MSELoss()  # Use Mean Squared Error for regression
-        criterion = nn.MSELoss()
-        optimizer = optim.Adam(NeRF.parameters(), lr=learning_rate)
-
-        # Load dataset (X_input, y_output) and move them to the GPU (if able). Then convert to float32 (expected by the NN)
-        X_input_batch = torch.tensor(saved_points[:, :3])
-        y_output_batch = torch.tensor(saved_points[:,3])
-        print(X_input_batch)
-        print(y_output_batch)
-        X_input_batch = X_input_batch.to(device)
-        y_output_batch = y_output_batch.to(device)
-        X_input_batch = X_input_batch.to(torch.float32)
-        y_output_batch = y_output_batch.to(torch.float32)
-        print("X_input_batch dtype:", X_input_batch.dtype)
-        print("y_output_batch dtype:", y_output_batch.dtype)
-
-        # Create the DataLoader
-        point_dataset = TensorDataset(X_input_batch, y_output_batch)
-        batch_size = 64
-        train_loader = DataLoader(point_dataset, batch_size=batch_size, shuffle=True)
-
-        #------------------------------------TRAINING ANTIGUO------------------------------------
-        # Training loop
-        #for epoch in range(num_epochs):
-            # Forward pass
-        #    outputs = NeRF(X_input_batch)
-        #    loss = criterion(outputs, y_output_batch)
-
-            # Backpropagation and optimization
-        #    optimizer.zero_grad()
-        #    loss.backward()
-        #    optimizer.step()
-
-            # Log or visualize training progress if desired
-        #    print(f"Epoch {epoch+1}/{num_epochs} completed // Batch loss: {loss.item()}")
-        #--------------------------------------------------------------------------------------------
-
-        # Training loop
-        for epoch in range(num_epochs):
-            running_loss = 0.0
-            
-            for batch in train_loader:
-                inputs, targets = batch
-                targets = targets.view(-1,1)
-
-                #Zero the parameter gradients
-                optimizer.zero_grad()
-
-                #Forward pass
-                outputs = NeRF(inputs)
-
-                #Calculate loss
-                loss = criterion(outputs, targets)
-
-                #Backpropagation/optimization
-                loss.backward()
-                optimizer.step()
-
-                running_loss += loss.item()
-
-            print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)}')
-
-
-        # Save the trained model if needed
-        torch.save(NeRF.state_dict(), 'nerf_model.pth')
-        print("Saved")
-        PC_counter = PC_counter + 1
-        print(f'PC COUNT: {PC_counter}')
-
-POS_counter = 0
-def POS_callback(msg):
-    #print("Received PoseStamped message:")
-    #print("Position (x, y, z): ({:.2f}, {:.2f}, {:.2f})".format(msg.pose.position.x, msg.pose.position.y, msg.pose.position.z))
-    #print("Orientation (x, y, z, w): ({:.2f}, {:.2f}, {:.2f}, {:.2f})".format(msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w))
-    global x_pos, y_pos, z_pos, Q, POS_counter
-    
-    x_pos = msg.pose.position.x
-    y_pos = msg.pose.position.y
-    z_pos = msg.pose.position.z
-    q0 = msg.pose.orientation.w
-    q1 = msg.pose.orientation.x
-    q2 = msg.pose.orientation.y
-    q3 = msg.pose.orientation.z
-    Q = np.array([q0, q1, q2, q3])
-    #print("Received position: x={:.2f}, y={:.2f}, z={:.2f}".format(x_pos, y_pos, z_pos))
-    #print(f'Q: {Q}')
-    POS_counter = POS_counter + 1
-    print(f'POS COUNT: {POS_counter}')
-
 
 
 def PC_POS_callback(PC_msg, POS_msg):
+    #--Parameters--
+    dist_between_iter = 0.5 # Meters between two training iterations
+    ang_between_iter = 20 # Degrees between two training iterations
+    lidar_lim = 5 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
+    points_per_ray = 20 # Points per LiDAR ray
+    learning_rate = 0.002 # NN hyperparameter
+    num_epochs = 5 # NN hyperparameter
+    batch_size = 64 # NN hyperparameter
+
     print("Synchronized message")
     global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points
     x_pos = POS_msg.pose.position.x
@@ -285,8 +142,6 @@ def PC_POS_callback(PC_msg, POS_msg):
     elif(acos_arg < -1):
         acos_arg = -1
     #print(f"Argumento del arcocoseno: {asin_arg}")
-    dist_between_iter = 0.5 #meters
-    ang_between_iter = 20 #degrees
     if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > dist_between_iter or 360/np.pi*np.arccos(acos_arg) > ang_between_iter):
         print("x =", x_pos)
         print("y =", y_pos)
@@ -303,7 +158,6 @@ def PC_POS_callback(PC_msg, POS_msg):
         pointcount = 0 #Contador de puntos detectados por el LiDAR
         wall_coordinates = np.empty((0,3)) #Para guardar los puntos con SDF=0 (paredes de objetos)
         #training_points = np.empty((0,4)) #Para guardar los puntos para entrenar la NeRF
-        lidar_lim = 5 # Radio del LiDAR para considerar los puntos (en metros)
         for p in pc2.read_points(PC_msg, field_names = ("x", "y", "z"), skip_nans=True):
             #Move to global coordinates
             if((p[0]**2 + p[1]**2 + p[2]**2) < lidar_lim**2): # Si está dentro del radio deseado, lo guarda como puntos de la pared
@@ -328,7 +182,6 @@ def PC_POS_callback(PC_msg, POS_msg):
 
         #--------Choose and estimate the sdf of points outside of the wall for training--------
         num_samp_ray = pointcount // 2 #LiDAR rays to be considered
-        points_per_ray = 20 #Points in every LiDAR ray considered
         rnd_ray = np.random.choice(range(0, pointcount), num_samp_ray, replace=False) # Takes random samples of available rays
         for k in rnd_ray: #For each ray
             wall_point = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2]]) #This is the wall point of that ray
@@ -343,10 +196,7 @@ def PC_POS_callback(PC_msg, POS_msg):
 
         #training_points = np.append(training_points,saved_points,axis=0) # Add the general points
         
-        #-----------Training Process-----------
-        # Define hyperparameters
-        learning_rate = 0.002
-        num_epochs = 20
+        #-----------Training Process-----------        
 
         # Initialize loss function and optimizer
         #criterion = nn.MSELoss()  # Use Mean Squared Error for regression
@@ -367,24 +217,7 @@ def PC_POS_callback(PC_msg, POS_msg):
 
         # Create the DataLoader
         point_dataset = TensorDataset(X_input_batch, y_output_batch)
-        batch_size = 64
         train_loader = DataLoader(point_dataset, batch_size=batch_size, shuffle=True)
-
-        #------------------------------------TRAINING ANTIGUO------------------------------------
-        # Training loop
-        #for epoch in range(num_epochs):
-            # Forward pass
-        #    outputs = NeRF(X_input_batch)
-        #    loss = criterion(outputs, y_output_batch)
-
-            # Backpropagation and optimization
-        #    optimizer.zero_grad()
-        #    loss.backward()
-        #    optimizer.step()
-
-            # Log or visualize training progress if desired
-        #    print(f"Epoch {epoch+1}/{num_epochs} completed // Batch loss: {loss.item()}")
-        #--------------------------------------------------------------------------------------------
 
         # Training loop
         for epoch in range(num_epochs):

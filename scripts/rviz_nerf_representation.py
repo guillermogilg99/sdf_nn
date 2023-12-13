@@ -17,11 +17,11 @@ from nav_msgs.msg import OccupancyGrid
 
 #----------------------------------MAP DETAILS-------------------------------------
 
-map_width = 10 # in meters
-map_height = 10 # in meters
+map_width = 50 # in meters
+map_height = 50 # in meters
 map_resolution = 0.1 # in meters
-x_min = 5
-y_min = -5
+x_min = -45
+y_min = -45
 z_cut = 2.40
 
 
@@ -43,13 +43,15 @@ class NeuralNetwork(nn.Module): # Se crea la red haciendo subclassing del nn.Mod
         super().__init__()
         self.flatten = nn.Flatten()
         self.linear_softplus_stack = nn.Sequential(
-            nn.Linear(3, 64),
-            nn.Dropout(0.5),
+            nn.Linear(3, 256),
             nn.Softplus(),
-            nn.Linear(64, 64),
-            nn.Dropout(0.5),
+            nn.Linear(256, 256),
             nn.Softplus(),
-            nn.Linear(64, 1),
+            nn.Linear(256, 256),
+            nn.Softplus(),
+            nn.Linear(256, 256),
+            nn.Softplus(),
+            nn.Linear(256, 1)
         )
 
     def forward(self, x): # Se implementan las operaciones sobre los datos de entrada en el forward
