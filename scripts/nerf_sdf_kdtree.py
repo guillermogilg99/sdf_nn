@@ -130,7 +130,7 @@ def PC_POS_callback(PC_msg, POS_msg):
     x_pos = POS_msg.pose.position.x
     y_pos = POS_msg.pose.position.y
     z_pos = POS_msg.pose.position.z
-    q0 = POS_msg.pose.orientation.w
+    q0 = POS_msg.pose.orientation.w #Pendiente de revisar si las coordenadas son en este orden
     q1 = POS_msg.pose.orientation.x
     q2 = POS_msg.pose.orientation.y
     q3 = POS_msg.pose.orientation.z

@@ -130,7 +130,7 @@ def PC_POS_callback(PC_msg, POS_msg):
 
 def main():
     # Initialize the ROS node
-    rospy.init_node('nerf_sdf', anonymous=True)
+    rospy.init_node('point_representation', anonymous=True)
 
     # Define pointcloud and pose topic
     topic_name_PC = "/velodyne_points"
@@ -140,10 +140,6 @@ def main():
     POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
     ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=1000000, slop=0.1)
     ts.registerCallback(PC_POS_callback)
-    # Subscribe to LiDAR data topic and Position/Orientation data topic
-    #rospy.Subscriber(topic_name_PC, PointCloud2, PC_callback)
-    #rospy.Subscriber(topic_name_POS, PoseStamped, POS_callback)
-
 
     # Keep the script running
     rospy.spin()
