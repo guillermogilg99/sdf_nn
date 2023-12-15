@@ -17,11 +17,11 @@ from nav_msgs.msg import OccupancyGrid
 
 #----------------------------------MAP DETAILS-------------------------------------
 
-map_width = 50 # in meters
-map_height = 50 # in meters
-map_resolution = 0.1 # in meters
-x_min = -45
-y_min = -45
+map_width = 5 # in meters
+map_height = 5 # in meters
+map_resolution = 0.05 # in meters
+x_min = 0
+y_min = -2.5
 z_cut = 2.40
 
 
@@ -90,9 +90,9 @@ def RViz_NeRF():
             input_tensor = torch.tensor([[value1, value2, value3]], dtype=torch.float32)
             output = NeRF(input_tensor.to(device))
             output_item = output.item()
-            print(output_item)
-            if output_item > 100: output_item = 100
+            if output_item > 3: output_item = 3
             if output_item < 0: output_item = 0
+            print(output_item)
 
             # Add your occupancy value (0 or 100) to the data list
             grid_data.append(output_item)

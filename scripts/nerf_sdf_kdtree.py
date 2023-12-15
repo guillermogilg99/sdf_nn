@@ -117,7 +117,7 @@ def RotQuad(Q): #Puede estar al revés (comprobar)
 
 def PC_POS_callback(PC_msg, POS_msg):
     #--Parameters--
-    dist_between_iter = 0.5 # Meters between two training iterations
+    dist_between_iter = 0.2 # Meters between two training iterations
     ang_between_iter = 20 # Degrees between two training iterations
     lidar_lim = 5 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
     points_per_ray = 20 # Points per LiDAR ray
