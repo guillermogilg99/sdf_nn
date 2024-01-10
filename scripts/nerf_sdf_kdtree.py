@@ -27,6 +27,7 @@ saved_points = np.empty((0,4))
 #Puntos de la pared escogidos (para posterior validación)
 taken_wall_points = np.empty((0,4))
 
+
 #Initialize variables
 Q = np.array([1, 0, 0, 0])
 Q_last = np.array([1, 0, 0, 0])
@@ -56,13 +57,6 @@ class NeuralNetwork(nn.Module): # Se crea la red haciendo subclassing del nn.Mod
         super().__init__()
         self.flatten = nn.Flatten()
         self.linear_softplus_stack = nn.Sequential(
-            #nn.Linear(3, 64),
-            #nn.Dropout(0.5),
-            #nn.Softplus(),
-            #nn.Linear(64, 64),
-            #nn.Dropout(0.5),
-            #nn.Softplus(),
-            #nn.Linear(64, 1),
             nn.Linear(3, 256),
             nn.Softplus(),
             nn.Linear(256, 256),
@@ -78,7 +72,7 @@ class NeuralNetwork(nn.Module): # Se crea la red haciendo subclassing del nn.Mod
         x = self.flatten(x)
         logits = self.linear_softplus_stack(x)
         return logits
-    
+
 NeRF = NeuralNetwork().to(device) # Instanciamos la red neuronal y la movemos a la GPU
 NeRF.train()
 print(NeRF) # Para ver la forma de la red (y asegurar que está siendo construida correctamente)
@@ -96,12 +90,12 @@ def RotQuad(Q): #Puede estar al revés (comprobar)
     r00 = 2 * (q0 * q0 + q1 * q1) - 1
     r01 = 2 * (q1 * q2 - q0 * q3)
     r02 = 2 * (q1 * q3 + q0 * q2)
-     
+    
     # Second row of the rotation matrix
     r10 = 2 * (q1 * q2 + q0 * q3)
     r11 = 2 * (q0 * q0 + q2 * q2) - 1
     r12 = 2 * (q2 * q3 - q0 * q1)
-     
+    
     # Third row of the rotation matrix
     r20 = 2 * (q1 * q3 - q0 * q2)
     r21 = 2 * (q2 * q3 + q0 * q1)
@@ -124,6 +118,7 @@ def PC_POS_callback(PC_msg, POS_msg):
     learning_rate = 0.002 # NN hyperparameter
     num_epochs = 5 # NN hyperparameter
     batch_size = 64 # NN hyperparameter
+    num_val_points = 100 # Validation points to be considered between epochs
 
     print("Synchronized message")
     global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points
@@ -190,17 +185,30 @@ def PC_POS_callback(PC_msg, POS_msg):
                 p_sdf_estimado, point_index = pkdtree.query(void_point)
                 new_tp = np.array([void_point[0], void_point[1], void_point[2], p_sdf_estimado])
                 saved_points = np.append(saved_points,[new_tp], axis=0)
-                #print(new_tp)
-                #training_points = np.append(training_points,[new_tp], axis=0)
-        #print("Done")
+                
+        #--------Create point list for validation between epochs-------
+        min_wall_range, point_index = pkdtree.query(drone_pos) # Calculates the min distance to a wall
+        val_point_list = np.empty((0,3))
+        val_pont_kdtree_sdf = np.empty((0,1))
+        for k in range(num_val_points):
+            dist_to_drone = np.random.uniform(0,min_wall_range) # Select a random float between 0 and the min distance to a wall
+            rnd_ang1 = np.random.uniform(0,2*np.pi) #Select two random angles
+            rnd_ang2 = np.random.uniform(0,2*np.pi)
+            x_val = drone_pos[0] + dist_to_drone*np.sin(rnd_ang1)*np.cos(rnd_ang2) # Calculate the coordinates of the new point
+            y_val = drone_pos[1] + dist_to_drone*np.sin(rnd_ang1)*np.sin(rnd_ang2)
+            z_val = drone_pos[2] + dist_to_drone*np.cos(rnd_ang1)
+            sdf_est_val, point_index = pkdtree.query(np.array([x_val, y_val, z_val])) # Calculate the sdf value of the point
+            new_val_point_cord = np.array([x_val, y_val, z_val])
+            new_val_point_sdf = np.array([sdf_est_val])
+            val_point_list = np.append(val_point_list,[new_val_point_cord], axis=0) # Store it in the list
+            val_pont_kdtree_sdf = np.append(val_pont_kdtree_sdf,[new_val_point_sdf], axis=0) # Store it in the list
 
-        #training_points = np.append(training_points,saved_points,axis=0) # Add the general points
+
         
         #-----------Training Process-----------        
 
         # Initialize loss function and optimizer
-        #criterion = nn.MSELoss()  # Use Mean Squared Error for regression
-        criterion = nn.MSELoss()
+        criterion = nn.MSELoss()  # Use Mean Squared Error for regression
         optimizer = optim.Adam(NeRF.parameters(), lr=learning_rate)
 
         # Load dataset (X_input, y_output) and move them to the GPU (if able). Then convert to float32 (expected by the NN)
@@ -222,7 +230,9 @@ def PC_POS_callback(PC_msg, POS_msg):
         # Training loop
         for epoch in range(num_epochs):
             running_loss = 0.0
-            
+            val_mse_total = 0.0
+
+
             for batch in train_loader:
                 inputs, targets = batch
                 targets = targets.view(-1,1)
@@ -242,8 +252,16 @@ def PC_POS_callback(PC_msg, POS_msg):
 
                 running_loss += loss.item()
 
-            print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)}')
 
+            # Check validation each epoch
+            for k in range(num_val_points):
+                val_input_tensor = torch.tensor([[val_point_list[k][0], val_point_list[k][1], val_point_list[k][2]]], dtype=torch.float32)
+                val_output = NeRF(val_input_tensor.to(device))
+                val_output_item = val_output.item()
+                val_mse_total = val_mse_total + (val_output_item-val_pont_kdtree_sdf[k][0])**2
+            val_mse_total = val_mse_total/num_val_points
+
+            print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)} ValLoss: {val_mse_total}')
 
         # Save the trained model if needed
         torch.save(NeRF.state_dict(), 'nerf_model.pth')

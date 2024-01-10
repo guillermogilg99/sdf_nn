@@ -158,6 +158,8 @@ include_directories(
 
 install(PROGRAMS
   scripts/nerf_sdf_kdtree.py
+  scripts/lidar_point_representation.py
+  scripts/rviz_nerf_representation.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
