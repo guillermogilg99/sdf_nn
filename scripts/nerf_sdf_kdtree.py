@@ -4,6 +4,7 @@ import rospy
 from std_msgs.msg import String
 import numpy as np
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import Imu
 import sensor_msgs.point_cloud2 as pc2
 from geometry_msgs.msg import PoseStamped
 from numpy import random
@@ -26,6 +27,9 @@ saved_points = np.empty((0,4))
 
 #Puntos de la pared escogidos (para posterior validación)
 taken_wall_points = np.empty((0,4))
+
+#Topic selection variables
+num_topics = 0
 
 
 #Initialize variables
@@ -109,7 +113,25 @@ def RotQuad(Q): #Puede estar al revés (comprobar)
     return rot_matrix
 
 
-def PC_POS_callback(PC_msg, POS_msg):
+def PC_POS_callback_2topics(PC_msg, POS_msg):
+    print("Synchronized message")
+    #print("POS Seq: ", POS_msg.header.seq)
+    #print("POS Stamp: ", POS_msg.header.stamp)
+    #print("PC Seq: ", PC_msg.header.seq)
+    #print("PC Stamp: ", PC_msg.header.stamp)
+    global x_pos, y_pos, z_pos, Q
+    x_pos = POS_msg.pose.position.x
+    y_pos = POS_msg.pose.position.y
+    z_pos = POS_msg.pose.position.z
+    q0 = POS_msg.pose.orientation.w #Pendiente de revisar si las coordenadas son en este orden
+    q1 = POS_msg.pose.orientation.x
+    q2 = POS_msg.pose.orientation.y
+    q3 = POS_msg.pose.orientation.z
+    Q = np.array([q0, q1, q2, q3])
+    NeRF_Trainer(PC_msg)
+
+
+def NeRF_Trainer(PC_msg):
     #--Parameters--
     dist_between_iter = 0.2 # Meters between two training iterations
     ang_between_iter = 20 # Degrees between two training iterations
@@ -120,16 +142,7 @@ def PC_POS_callback(PC_msg, POS_msg):
     batch_size = 64 # NN hyperparameter
     num_val_points = 100 # Validation points to be considered between epochs
 
-    print("Synchronized message")
     global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points
-    x_pos = POS_msg.pose.position.x
-    y_pos = POS_msg.pose.position.y
-    z_pos = POS_msg.pose.position.z
-    q0 = POS_msg.pose.orientation.w #Pendiente de revisar si las coordenadas son en este orden
-    q1 = POS_msg.pose.orientation.x
-    q2 = POS_msg.pose.orientation.y
-    q3 = POS_msg.pose.orientation.z
-    Q = np.array([q0, q1, q2, q3])
     #print(f"q0 = {Q[0]}, q1 = {Q[1]}, q2 = {Q[2]}, q3 = {Q[3]} || q0last = {Q_last[0]}, q1last = {Q_last[1]}, q2last = {Q_last[2]}, q3last = {Q_last[3]}")
     acos_arg = np.abs(Q[0]*Q_last[0]+Q[1]*Q_last[1]+Q[2]*Q_last[2]+Q[3]*Q_last[3])
     if(acos_arg > 1):
@@ -140,6 +153,7 @@ def PC_POS_callback(PC_msg, POS_msg):
     if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > dist_between_iter or 360/np.pi*np.arccos(acos_arg) > ang_between_iter):
         print("x =", x_pos)
         print("y =", y_pos)
+        print("z =", z_pos)
         dist_dif = np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2)
         ang_dif = 360/np.pi*np.arccos(acos_arg)
         print("distance dif =", dist_dif)
@@ -152,7 +166,6 @@ def PC_POS_callback(PC_msg, POS_msg):
         drone_pos = np.array([x_pos, y_pos, z_pos])
         pointcount = 0 #Contador de puntos detectados por el LiDAR
         wall_coordinates = np.empty((0,3)) #Para guardar los puntos con SDF=0 (paredes de objetos)
-        #training_points = np.empty((0,4)) #Para guardar los puntos para entrenar la NeRF
         for p in pc2.read_points(PC_msg, field_names = ("x", "y", "z"), skip_nans=True):
             #Move to global coordinates
             if((p[0]**2 + p[1]**2 + p[2]**2) < lidar_lim**2): # Si está dentro del radio deseado, lo guarda como puntos de la pared
@@ -162,6 +175,7 @@ def PC_POS_callback(PC_msg, POS_msg):
                 total_wall_point_list = np.append(total_wall_point_list, [pglobal], axis=0)
                 #print(" x : %f  y: %f  z: %f" %(pglobal[0],pglobal[1],pglobal[2]))
                 pointcount = pointcount + 1
+        print("pointcount =", pointcount)
 
         #------------------Choose random wall points for the training------------------
         num_samples_wallpoints = pointcount #Wall points to be considered (from 0 to pointcount)
@@ -267,23 +281,34 @@ def PC_POS_callback(PC_msg, POS_msg):
         torch.save(NeRF.state_dict(), 'nerf_model.pth')
         print("Saved")
 
+def blank_callback(PC_msg,POS_msg):
+    print("First Sync Completed")
 
 def main():
     # Initialize the ROS node
     rospy.init_node('nerf_sdf', anonymous=True)
 
-    # Define pointcloud and pose topic
-    topic_name_PC = "/velodyne_points"
-    topic_name_POS = "/ground_truth_to_tf/pose"
+    #Input topic selection
+    topic_selector = 0
 
-    PC_sub = message_filters.Subscriber(topic_name_PC, PointCloud2)
-    POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
-    ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=1000000, slop=0.1)
-    ts.registerCallback(PC_POS_callback)
-    # Subscribe to LiDAR data topic and Position/Orientation data topic
-    #rospy.Subscriber(topic_name_PC, PointCloud2, PC_callback)
-    #rospy.Subscriber(topic_name_POS, PoseStamped, POS_callback)
 
+    if topic_selector == 0:
+        topic_name_PC = "/velodyne_points"
+        topic_name_POS = "/ground_truth_to_tf/pose"
+        PC_sub = message_filters.Subscriber(topic_name_PC, PointCloud2)
+        POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
+        ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=1000000, slop=0.1)
+        ts.registerCallback(PC_POS_callback_2topics)
+
+    elif topic_selector == 1:
+        topic_name_PC = "/os1_cloud_node1/points"
+        topic_name_POS = "/leica/pose/relative"
+        PC_sub = message_filters.Subscriber(topic_name_PC, PointCloud2)
+        POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
+        ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=10000000, slop=0.1)
+        ts.registerCallback(PC_POS_callback_2topics)
+    else:
+        print("Error: topic_selector value is not supported")
 
     # Keep the script running
     rospy.spin()
