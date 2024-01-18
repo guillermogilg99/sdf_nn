@@ -21,6 +21,9 @@ from torchvision import datasets, transforms
 #Complete point list (burrada)
 total_wall_point_list = np.empty((0,3))
 
+#Lista de puntos donde se han tomado muestras
+training_positions = np.empty((0,3))
+
 #Puntos de recuerdo
 cont_lidar=0
 saved_points = np.empty((0,4))
@@ -133,16 +136,19 @@ def PC_POS_callback_2topics(PC_msg, POS_msg):
 
 def NeRF_Trainer(PC_msg):
     #--Parameters--
-    dist_between_iter = 0.2 # Meters between two training iterations
-    ang_between_iter = 20 # Degrees between two training iterations
-    lidar_lim = 5 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
-    points_per_ray = 20 # Points per LiDAR ray
+    dist_between_iter = 1 # Meters between two training iterations
+    #ang_between_iter = 20 # Degrees between two training iterations
+    lidar_lim_max = 25 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
+    lidar_lim_min = 0.3
+    max_rays = 500  # Max number of rays to be considered
+    max_wall_points = 500 # Max number of wall points to be considered for training
+    points_per_ray = 5 # Points per LiDAR ray
     learning_rate = 0.002 # NN hyperparameter
     num_epochs = 5 # NN hyperparameter
     batch_size = 64 # NN hyperparameter
     num_val_points = 100 # Validation points to be considered between epochs
 
-    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points
+    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points, training_positions
     #print(f"q0 = {Q[0]}, q1 = {Q[1]}, q2 = {Q[2]}, q3 = {Q[3]} || q0last = {Q_last[0]}, q1last = {Q_last[1]}, q2last = {Q_last[2]}, q3last = {Q_last[3]}")
     acos_arg = np.abs(Q[0]*Q_last[0]+Q[1]*Q_last[1]+Q[2]*Q_last[2]+Q[3]*Q_last[3])
     if(acos_arg > 1):
@@ -150,12 +156,20 @@ def NeRF_Trainer(PC_msg):
     elif(acos_arg < -1):
         acos_arg = -1
     #print(f"Argumento del arcocoseno: {asin_arg}")
-    if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > dist_between_iter or 360/np.pi*np.arccos(acos_arg) > ang_between_iter):
+    drone_pos = np.array([x_pos, y_pos, z_pos])
+    if training_positions.shape[0] == 0:
+        dist_to_closest_tp = dist_between_iter + 1 # Asures that the training is made if the list is empty
+    else:
+        tpkdtree = cKDTree(training_positions)
+        dist_to_closest_tp, _ = tpkdtree.query(drone_pos) # Checks distance to the closest training position
+    if(dist_to_closest_tp > dist_between_iter):
+    #if (np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2) > dist_between_iter or 180/np.pi*np.arccos(acos_arg) > ang_between_iter):
+        training_positions = np.append(training_positions, [drone_pos], axis=0) # Add this position to the list of positions where training was performed
         print("x =", x_pos)
         print("y =", y_pos)
         print("z =", z_pos)
         dist_dif = np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2)
-        ang_dif = 360/np.pi*np.arccos(acos_arg)
+        ang_dif = 180/np.pi*np.arccos(acos_arg)
         print("distance dif =", dist_dif)
         print("angle dif =", ang_dif)
         R = RotQuad(Q) #Matriz de rotación del dron
@@ -163,12 +177,11 @@ def NeRF_Trainer(PC_msg):
         y_last = y_pos
         z_last = z_pos
         Q_last = Q
-        drone_pos = np.array([x_pos, y_pos, z_pos])
         pointcount = 0 #Contador de puntos detectados por el LiDAR
         wall_coordinates = np.empty((0,3)) #Para guardar los puntos con SDF=0 (paredes de objetos)
         for p in pc2.read_points(PC_msg, field_names = ("x", "y", "z"), skip_nans=True):
             #Move to global coordinates
-            if((p[0]**2 + p[1]**2 + p[2]**2) < lidar_lim**2): # Si está dentro del radio deseado, lo guarda como puntos de la pared
+            if((p[0]**2 + p[1]**2 + p[2]**2) < lidar_lim_max**2 and (p[0]**2 + p[1]**2 + p[2]**2) > lidar_lim_min**2): # Si está dentro del radio deseado, lo guarda como puntos de la pared
                 plocal = np.array([p[0], p[1], p[2]])
                 pglobal = drone_pos + R @ plocal
                 wall_coordinates =np.append(wall_coordinates, [pglobal], axis=0)
@@ -178,7 +191,7 @@ def NeRF_Trainer(PC_msg):
         print("pointcount =", pointcount)
 
         #------------------Choose random wall points for the training------------------
-        num_samples_wallpoints = pointcount #Wall points to be considered (from 0 to pointcount)
+        num_samples_wallpoints = np.min([pointcount, max_wall_points]) #Wall points to be trained with
         rnd_samples1 = np.random.choice(range(0, pointcount), num_samples_wallpoints, replace=False)
         for k in rnd_samples1:
             new_tp = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2], 0])
@@ -190,18 +203,19 @@ def NeRF_Trainer(PC_msg):
         pkdtree = cKDTree(total_wall_point_list)
 
         #--------Choose and estimate the sdf of points outside of the wall for training--------
-        num_samp_ray = pointcount // 2 #LiDAR rays to be considered
+        num_samp_ray = np.min([pointcount // 2, max_rays]) #LiDAR rays to be considered
         rnd_ray = np.random.choice(range(0, pointcount), num_samp_ray, replace=False) # Takes random samples of available rays
         for k in rnd_ray: #For each ray
             wall_point = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2]]) #This is the wall point of that ray
             for l in range(1,points_per_ray + 1): #For each point per ray
-                void_point = drone_pos + (wall_point-drone_pos)*random.uniform() # Coge puntos aleatorios a lo largo del rayo
-                p_sdf_estimado, point_index = pkdtree.query(void_point)
+                void_point = drone_pos + (wall_point-drone_pos)*random.triangular(0, 0.5, 1) # Coge puntos aleatorios a lo largo del rayo
+                p_sdf_estimado, _ = pkdtree.query(void_point)
                 new_tp = np.array([void_point[0], void_point[1], void_point[2], p_sdf_estimado])
                 saved_points = np.append(saved_points,[new_tp], axis=0)
-                
+        
+        print(saved_points)
         #--------Create point list for validation between epochs-------
-        min_wall_range, point_index = pkdtree.query(drone_pos) # Calculates the min distance to a wall
+        min_wall_range, _ = pkdtree.query(drone_pos) # Calculates the min distance to a wall
         val_point_list = np.empty((0,3))
         val_pont_kdtree_sdf = np.empty((0,1))
         for k in range(num_val_points):
@@ -281,15 +295,12 @@ def NeRF_Trainer(PC_msg):
         torch.save(NeRF.state_dict(), 'nerf_model.pth')
         print("Saved")
 
-def blank_callback(PC_msg,POS_msg):
-    print("First Sync Completed")
-
 def main():
     # Initialize the ROS node
     rospy.init_node('nerf_sdf', anonymous=True)
 
     #Input topic selection
-    topic_selector = 0
+    topic_selector = 1
 
 
     if topic_selector == 0:
