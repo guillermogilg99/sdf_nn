@@ -18,14 +18,16 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
-#Complete point list (burrada)
+#Complete point list
 total_wall_point_list = np.empty((0,3))
 
-#Lista de puntos donde se han tomado muestras
+#Lista de puntos en coordenadas globales donde se han tomado muestras
 training_positions = np.empty((0,3))
 
-#Puntos de recuerdo
-cont_lidar=0
+#Puntos para el entrenamiento
+training_points = np.empty((0,4))
+
+#Puntos pasados (para recordar)
 saved_points = np.empty((0,4))
 
 #Puntos de la pared escogidos (para posterior validación)
@@ -143,12 +145,14 @@ def NeRF_Trainer(PC_msg):
     max_rays = 500  # Max number of rays to be considered
     max_wall_points = 500 # Max number of wall points to be considered for training
     points_per_ray = 5 # Points per LiDAR ray
+    num_past_points = 500 # Past points to be added to the training
     learning_rate = 0.002 # NN hyperparameter
-    num_epochs = 5 # NN hyperparameter
+    num_epochs = 10 # NN hyperparameter
     batch_size = 64 # NN hyperparameter
     num_val_points = 100 # Validation points to be considered between epochs
 
-    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, saved_points, cont_lidar, taken_wall_points, training_positions
+    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, training_points, taken_wall_points, training_positions, saved_points
+
     #print(f"q0 = {Q[0]}, q1 = {Q[1]}, q2 = {Q[2]}, q3 = {Q[3]} || q0last = {Q_last[0]}, q1last = {Q_last[1]}, q2last = {Q_last[2]}, q3last = {Q_last[3]}")
     acos_arg = np.abs(Q[0]*Q_last[0]+Q[1]*Q_last[1]+Q[2]*Q_last[2]+Q[3]*Q_last[3])
     if(acos_arg > 1):
@@ -190,19 +194,22 @@ def NeRF_Trainer(PC_msg):
                 pointcount = pointcount + 1
         print("pointcount =", pointcount)
 
+        training_points = np.empty((0,4)) # Reset the training points
+
         #------------------Choose random wall points for the training------------------
+
         num_samples_wallpoints = np.min([pointcount, max_wall_points]) #Wall points to be trained with
         rnd_samples1 = np.random.choice(range(0, pointcount), num_samples_wallpoints, replace=False)
         for k in rnd_samples1:
             new_tp = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2], 0])
-            saved_points = np.append(saved_points,[new_tp], axis=0)
-            #training_points = np.append(training_points, [new_tp], axis=0)
+            training_points = np.append(training_points,[new_tp], axis=0)
             taken_wall_points = np.append(taken_wall_points, [new_tp], axis=0)
 
         #Create the kdTree for the next step
         pkdtree = cKDTree(total_wall_point_list)
 
         #--------Choose and estimate the sdf of points outside of the wall for training--------
+
         num_samp_ray = np.min([pointcount // 2, max_rays]) #LiDAR rays to be considered
         rnd_ray = np.random.choice(range(0, pointcount), num_samp_ray, replace=False) # Takes random samples of available rays
         for k in rnd_ray: #For each ray
@@ -211,10 +218,23 @@ def NeRF_Trainer(PC_msg):
                 void_point = drone_pos + (wall_point-drone_pos)*random.triangular(0, 0.5, 1) # Coge puntos aleatorios a lo largo del rayo
                 p_sdf_estimado, _ = pkdtree.query(void_point)
                 new_tp = np.array([void_point[0], void_point[1], void_point[2], p_sdf_estimado])
-                saved_points = np.append(saved_points,[new_tp], axis=0)
+                training_points = np.append(training_points,[new_tp], axis=0)
         
-        print(saved_points)
+        #--------Add past points and add new training points to the past points list----------
+        print("Training points before past points", training_points.shape[0])
+        print("Stored past points: ", saved_points.shape[0])
+        if saved_points.size > 0:
+            rnd_past_points = np.random.choice(range(0, saved_points.shape[0]), num_past_points, replace=False)
+            saved_points = np.append(saved_points, training_points, axis=0)
+            for k in rnd_past_points:
+                training_points = np.append(training_points, [saved_points[k]], axis=0)
+        else:
+            saved_points = np.append(saved_points, training_points, axis=0)
+        
+        print("Number of training points", training_points.shape[0])
+        
         #--------Create point list for validation between epochs-------
+                
         min_wall_range, _ = pkdtree.query(drone_pos) # Calculates the min distance to a wall
         val_point_list = np.empty((0,3))
         val_pont_kdtree_sdf = np.empty((0,1))
@@ -232,7 +252,7 @@ def NeRF_Trainer(PC_msg):
             val_pont_kdtree_sdf = np.append(val_pont_kdtree_sdf,[new_val_point_sdf], axis=0) # Store it in the list
 
 
-        
+
         #-----------Training Process-----------        
 
         # Initialize loss function and optimizer
@@ -240,8 +260,8 @@ def NeRF_Trainer(PC_msg):
         optimizer = optim.Adam(NeRF.parameters(), lr=learning_rate)
 
         # Load dataset (X_input, y_output) and move them to the GPU (if able). Then convert to float32 (expected by the NN)
-        X_input_batch = torch.tensor(saved_points[:, :3])
-        y_output_batch = torch.tensor(saved_points[:,3])
+        X_input_batch = torch.tensor(training_points[:, :3])
+        y_output_batch = torch.tensor(training_points[:,3])
         print(X_input_batch)
         print(y_output_batch)
         X_input_batch = X_input_batch.to(device)
@@ -287,6 +307,7 @@ def NeRF_Trainer(PC_msg):
                 val_output = NeRF(val_input_tensor.to(device))
                 val_output_item = val_output.item()
                 val_mse_total = val_mse_total + (val_output_item-val_pont_kdtree_sdf[k][0])**2
+
             val_mse_total = val_mse_total/num_val_points
 
             print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)} ValLoss: {val_mse_total}')
@@ -294,13 +315,13 @@ def NeRF_Trainer(PC_msg):
         # Save the trained model if needed
         torch.save(NeRF.state_dict(), 'nerf_model.pth')
         print("Saved")
-
+        
 def main():
     # Initialize the ROS node
     rospy.init_node('nerf_sdf', anonymous=True)
 
     #Input topic selection
-    topic_selector = 1
+    topic_selector = 0
 
 
     if topic_selector == 0:
