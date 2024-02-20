@@ -138,7 +138,7 @@ def PC_POS_callback_2topics(PC_msg, POS_msg):
 
 def NeRF_Trainer(PC_msg):
     #--Parameters--
-    dist_between_iter = 1 # Meters between two training iterations
+    dist_between_iter = 0.1 # Meters between two training iterations
     #ang_between_iter = 20 # Degrees between two training iterations
     lidar_lim_max = 25 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
     lidar_lim_min = 0.3
@@ -253,7 +253,7 @@ def NeRF_Trainer(PC_msg):
 
 
 
-        #-----------Training Process-----------        
+        #-----------Training Process-----------
 
         # Initialize loss function and optimizer
         criterion = nn.MSELoss()  # Use Mean Squared Error for regression

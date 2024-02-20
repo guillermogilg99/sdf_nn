@@ -49,7 +49,7 @@ NeRF = NeuralNetwork().to(device) # Instanciamos la red neuronal y la movemos a 
 # Construct the path to the pre-trained weights
 file_dir = os.path.dirname(os.path.abspath(__file__))
 models_dir = os.path.join(file_dir, 'nn_weights')
-pre_trained_weights_path = os.path.join(models_dir, 'nerf_model.pth')  # Adjust the file name accordingly
+pre_trained_weights_path = os.path.join(models_dir, 'nerf_model_santi_03.pth')  # Adjust the file name accordingly
 
 
 NeRF.load_state_dict(torch.load(pre_trained_weights_path))

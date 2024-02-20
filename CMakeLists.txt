@@ -12,7 +12,6 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   geometry_msgs
   std_msgs
-  sdf_nn
   message_generation
 )
 
