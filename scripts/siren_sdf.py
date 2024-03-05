@@ -18,6 +18,85 @@ from siren_pytorch import SirenNet
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
+#Complete point list
+total_wall_point_list = np.empty((0,3))
+
+#Lista de puntos en coordenadas globales donde se han tomado muestras
+training_positions = np.empty((0,3))
+
+#Puntos para el entrenamiento
+training_points = np.empty((0,4))
+
+#Puntos pasados (para recordar)
+saved_points = np.empty((0,4))
+
+#Puntos de la pared escogidos (para posterior validación)
+taken_wall_points = np.empty((0,4))
+
+#Topic selection variables
+num_topics = 0
+
+
+#Initialize variables
+Q = np.array([1, 0, 0, 0])
+Q_last = np.array([1, 0, 0, 0])
+x_pos = 0
+y_pos = 0
+z_pos = 0
+x_last = -1000
+y_last = -1000
+z_last = -1000
+x_ini = np.nan
+y_ini = np.nan
+z_ini = np.nan
+
+# ----------------Voxel map and functions definition 
+voxel_size = 0.01 # voxel size (m)
+voxel_map_dim = 10 # voxel map radius (m) 
+
+voxel_grid_dim = voxel_map_dim / voxel_size # voxel map radius (in voxel numbers)
+map_total_dim = 2*voxel_grid_dim + 1 # voxel map dimension (in voxel numbers)
+voxel_grid = np.full((map_total_dim,map_total_dim, map_total_dim), np.nan)
+
+def update_sdf_point(target_point_x, target_point_y, target_point_z, voxel_grid_in):
+    for radius in range(1,voxel_grid_dim):
+        indices =  np.empty((0,3))
+        for i in range(-radius, radius + 1):
+            for j in range(-radius, radius + 1):
+                search_pos = np.array([target_point_x + i, target_point_y + j, target_point_z + radius])
+                indices = np.append(indices, [search_pos], axis=0)
+                search_pos = np.array([target_point_x + i, target_point_y + j, target_point_z - radius])
+                indices = np.append(indices, [search_pos], axis=0)
+        for i in range(-radius, radius + 1):
+            for k in range (-radius + 1, radius):
+                search_pos = np.array([target_point_x + i, target_point_y + radius, target_point_z + k])
+                indices = np.append(indices, [search_pos], axis=0)
+                search_pos = np.array([target_point_x + i, target_point_y - radius, target_point_z + k])
+                indices = np.append(indices, [search_pos], axis=0)
+        for j in range(-radius + 1, radius):
+            for k in range (-radius + 1, radius):
+                search_pos = np.array([target_point_x + radius, target_point_y + j, target_point_z + k])
+                indices = np.append(indices, [search_pos], axis=0)
+                search_pos = np.array([target_point_x - radius, target_point_y + j, target_point_z + k])
+                indices = np.append(indices, [search_pos], axis=0)
+        
+        sdf_prov_distance = 0
+        for row in indices:
+            if(voxel_grid_in[row[0]][row[1]][row[2]] == 0):
+                sdf_prov_distance = np.sqrt((target_point_x - row[0])**2 + (target_point_y - row[1])**2 + (target_point_z - row[2])**2) * voxel_size
+                if(voxel_grid_in[target_point_x][target_point_y][target_point_z] == np.nan or voxel_grid_in[target_point_x][target_point_y][target_point_z] > sdf_prov_distance):
+                    voxel_grid_in[target_point_x][target_point_y][target_point_z] = sdf_prov_distance
+        
+        if(sdf_prov_distance != 0):
+            return
+                
+def update_sdf(voxel_grid_in):
+    for i in range(voxel_grid.shape[0]):
+        for j in range(voxel_grid.shape[1]):
+            for k in range(voxel_grid.shape[2]):
+                if(voxel_grid_in[i][j][k] != 0):
+                    update_sdf_point(i,j,k,voxel_grid_in)
+
 # ----------------Declaración de la red ==> SIREN, 4 hidden layers con 256 neuronas, periodic (sinusoidal) activations, linear output layer, custom loss, custom initial weights
 device = (
     "cuda"
@@ -143,7 +222,6 @@ def SIREN_Trainer(PC_msg):
     max_wall_points = 500 # Max number of wall points to be considered for training
     points_per_ray = 5 # Points per LiDAR ray
     num_past_points = 500 # Past points to be added to the training
-    learning_rate = 0.002 # NN hyperparameter
     num_epochs = 10 # NN hyperparameter
     batch_size = 64 # NN hyperparameter
     lambda_SDF = 5 # SDF loss weight
@@ -202,15 +280,46 @@ def SIREN_Trainer(PC_msg):
     # ----------------Actualizar Voxfield con los puntos nuevos y obtener samples para el entrenamiento-----------------------
     N = 10000 # samples close to surface (dist < 5 cm)
     M = 30000 # samples away from surface
-    voxel_size = 0.1 # voxel size (m)
+    
 
+    # Initialize initial position if not already done
+    if (x_ini == np.nan and y_ini == np.nan and z_ini == np.nan):
+        x_ini = x_pos
+        y_ini = y_pos
+        z_ini = z_pos
 
+    # Update voxel grid with new points
+    for row in wall_coordinates:
+        x_wall_p = np.rint((wall_coordinates[row][0] - x_ini)/voxel_size) + voxel_grid_dim
+        y_wall_p = np.rint((wall_coordinates[row][1] - y_ini)/voxel_size) + voxel_grid_dim
+        z_wall_p = np.rint((wall_coordinates[row][2] - z_ini)/voxel_size) + voxel_grid_dim
+        voxel_grid[x_wall_p][y_wall_p][z_wall_p] = 0
+    
+    update_sdf(voxel_grid)
+
+    # Sampling
+    
 
     # ----------------Obtener puntos locales a través de la estimación del SDF por fuerza bruta-------------------------------
     truncation_dist = 0.2 # max distance to consider local points
     S = 1000 # rays to be considered
     Q = 20 # points per ray to be considered
 
+    #Create the kdTree for the next step
+    pkdtree = cKDTree(total_wall_point_list)
+
+    rnd_ray = np.random.choice(range(0, pointcount), S, replace=False) # Takes random samples of available rays
+    for k in rnd_ray: #For each ray
+        wall_point = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2]]) # This is the wall point of that ray
+        for l in range(1,Q + 1): #For each point per ray
+            dist_to_wall = random.uniform(-truncation_dist, truncation_dist)
+            void_point = wall_point + ((wall_point-drone_pos)/np.linalg.norm(wall_point-drone_pos))*dist_to_wall # Coge puntos aleatorios a lo largo del rayo
+            p_sdf_estimado, _ = pkdtree.query(void_point)
+            if dist_to_wall > 0: # Si el punto está dentro de la pared, se cambia el signo del sdfestimado
+                p_sdf_estimado = -p_sdf_estimado
+            new_tp = np.array([void_point[0], void_point[1], void_point[2], p_sdf_estimado])
+            if truncation_dist >= np.abs(p_sdf_estimado): # If within bounds, add to the training point list
+                training_points = np.append(training_points,[new_tp], axis=0)
 
     # ----------------Entrenamiento de la SIREN--------------------------------------------------------------------------------
     criterion = CustomLoss(lambda_SDF, lambda_eikonal)
