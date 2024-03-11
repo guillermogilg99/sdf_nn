@@ -56,46 +56,126 @@ voxel_map_dim = 10 # voxel map radius (m)
 
 voxel_grid_dim = voxel_map_dim / voxel_size # voxel map radius (in voxel numbers)
 map_total_dim = 2*voxel_grid_dim + 1 # voxel map dimension (in voxel numbers)
-voxel_grid = np.full((map_total_dim,map_total_dim, map_total_dim), np.nan)
+voxel_grid = np.full((map_total_dim,map_total_dim, map_total_dim), -1000)
 
-def update_sdf_point(target_point_x, target_point_y, target_point_z, voxel_grid_in):
-    for radius in range(1,voxel_grid_dim):
-        indices =  np.empty((0,3))
-        for i in range(-radius, radius + 1):
-            for j in range(-radius, radius + 1):
-                search_pos = np.array([target_point_x + i, target_point_y + j, target_point_z + radius])
-                indices = np.append(indices, [search_pos], axis=0)
-                search_pos = np.array([target_point_x + i, target_point_y + j, target_point_z - radius])
-                indices = np.append(indices, [search_pos], axis=0)
-        for i in range(-radius, radius + 1):
-            for k in range (-radius + 1, radius):
-                search_pos = np.array([target_point_x + i, target_point_y + radius, target_point_z + k])
-                indices = np.append(indices, [search_pos], axis=0)
-                search_pos = np.array([target_point_x + i, target_point_y - radius, target_point_z + k])
-                indices = np.append(indices, [search_pos], axis=0)
-        for j in range(-radius + 1, radius):
-            for k in range (-radius + 1, radius):
-                search_pos = np.array([target_point_x + radius, target_point_y + j, target_point_z + k])
-                indices = np.append(indices, [search_pos], axis=0)
-                search_pos = np.array([target_point_x - radius, target_point_y + j, target_point_z + k])
-                indices = np.append(indices, [search_pos], axis=0)
-        
-        sdf_prov_distance = 0
-        for row in indices:
-            if(voxel_grid_in[row[0]][row[1]][row[2]] == 0):
-                sdf_prov_distance = np.sqrt((target_point_x - row[0])**2 + (target_point_y - row[1])**2 + (target_point_z - row[2])**2) * voxel_size
-                if(voxel_grid_in[target_point_x][target_point_y][target_point_z] == np.nan or voxel_grid_in[target_point_x][target_point_y][target_point_z] > sdf_prov_distance):
-                    voxel_grid_in[target_point_x][target_point_y][target_point_z] = sdf_prov_distance
-        
-        if(sdf_prov_distance != 0):
-            return
+def check_line_of_sight(x_ini,y_ini,z_ini,x_last,y_last,z_last): # Returns 1 if line of sight exists, 0 otherwise
+
+    global voxel_grid
+
+    # Calculte difference between points
+    dx = x_last - x_ini
+    dy = y_last - y_ini
+    dz = z_last - z_ini
+
+    # Determne increments for each axis
+    sx = 1 if dx > 0 else -1
+    sy = 1 if dy > 0 else -1
+    sz = 1 if dz > 0 else -1
+
+    dx = abs(dx)
+    dy = abs(dy)
+    dz = abs(dz)
+
+    # Initialize internal counters
+    cont_x = 1
+    cont_y = 1
+    cont_z = 1
+
+    x_act = x_ini
+    y_act = y_ini
+    z_act = z_ini
+
+    while (x_act, y_act, z_act) != (x_last, y_last, z_last):
+        x_coef = cont_x/(dx*2)
+        y_coef = cont_y/(dy*2)
+        z_coef = cont_z/(dz*2)
+
+        if (x_coef <= y_coef and x_coef <= z_coef):
+            x_act += sx
+            cont_x += 2
+        if (y_coef <= x_coef and y_coef <= z_coef):
+            y_act += sy
+            cont_y += 2
+        if (z_coef <= y_coef and z_coef <= x_coef):
+            z_act += sz
+            cont_z += 2
+
+        if (voxel_grid[x_act][y_act][z_act] == 0):
+            return 0
+    
+    return 1
+
+def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_drone, z_drone, discrete_wall_coordinates):
+    # Comparar cada punto con los obstáculos nuevos y actualizarlo si el valor absoluto es menor con las nuevas paredes
+    global voxel_grid
+    sdf_prov_distance = np.nan # Inicializo la variable para guardar el sdf
+    for row in discrete_wall_coordinates: # Por cada nuevo obstáculo detectado
+        dist_to_obstacle = np.sqrt((target_point_x - row[0])**2 + (target_point_y - row[1])**2 + (target_point_z - row[2])**2) * voxel_size
+        if (sdf_prov_distance == np.nan or dist_to_obstacle < sdf_prov_distance): # Si es el primer punto o el nuevo punto está más cerca que los anteriores
+            sdf_prov_distance = dist_to_obstacle # Actualizo el sdf estimado
+
+    # Una vez terminado se comprueba el signo
+    if(voxel_grid[target_point_x][target_point_y][target_point_z] <= 0): # Si el sdf anterior es negativo
+        los_result = check_line_of_sight(x_drone,y_drone,z_drone,target_point_x, target_point_y, target_point_z) # Checkea Line of Sight
+        if(los_result == 1): # Si hay línea de visión
+            voxel_grid[target_point_x][target_point_y][target_point_z] = sdf_prov_distance # El nuevo sdf es positivo
+        else:                 # Si no
+            voxel_grid[target_point_x][target_point_y][target_point_z] = -sdf_prov_distance # El nuevo sdf es negativo
+    else:
+        voxel_grid[target_point_x][target_point_y][target_point_z] = sdf_prov_distance # Si ya era positivo antes, debe seguir siéndolo
+    return
+
+
+#DEPRECATED def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_drone, z_drone):
+#    # Comparar cada punto con los obstáculos nuevos y actualizarlo si el valor absoluto es menor con las nuevas paredes
+#    global voxel_grid
+#    for radius in range(1,voxel_grid_dim):
+#        indices =  np.empty((0,3))
+#        for i in range(-radius, radius + 1):
+#            for j in range(-radius, radius + 1):
+#                search_pos = np.array([target_point_x + i, target_point_y + j, target_point_z + radius])
+#                indices = np.append(indices, [search_pos], axis=0)
+#                search_pos = np.array([target_point_x + i, target_point_y + j, target_point_z - radius])
+#                indices = np.append(indices, [search_pos], axis=0)
+#        for i in range(-radius, radius + 1):
+#            for k in range (-radius + 1, radius):
+#                search_pos = np.array([target_point_x + i, target_point_y + radius, target_point_z + k])
+#                indices = np.append(indices, [search_pos], axis=0)
+#                search_pos = np.array([target_point_x + i, target_point_y - radius, target_point_z + k])
+#                indices = np.append(indices, [search_pos], axis=0)
+#        for j in range(-radius + 1, radius):
+#            for k in range (-radius + 1, radius):
+#                search_pos = np.array([target_point_x + radius, target_point_y + j, target_point_z + k])
+#                indices = np.append(indices, [search_pos], axis=0)
+#                search_pos = np.array([target_point_x - radius, target_point_y + j, target_point_z + k])
+#                indices = np.append(indices, [search_pos], axis=0)
+#        
+#        sdf_prov_distance = 0   # Inicializo la variable donde guarda el sdf estimado
+#        for row in indices:        # Para cada punto de la lista
+#            if(0 <= row[0] < map_total_dim and 0 <= row[1] < map_total_dim and 0 <= row[2] < map_total_dim): # Si la casilla está en el grid (hay puntos de la lista que no tienene por qué estar en el grid delimitado)
+#                if(voxel_grid[row[0]][row[1]][row[2]] == 0):                                              # Si es un obstáculo
+#                    dist_to_obstacle = np.sqrt((target_point_x - row[0])**2 + (target_point_y - row[1])**2 + (target_point_z - row[2])**2) * voxel_size #   Calcula la distancia al obstáculo
+#                    if(sdf_prov_distance == 0 or dist_to_obstacle < sdf_prov_distance): # Si es el primer obstáculo que encuentra o la distancia al mismo es la menor hasta ahora
+#                        sdf_prov_distance = dist_to_obstacle                            # Guarda la distancia como módulo del sdf que se va a introducir en ese punto
+#        
+#        if(sdf_prov_distance != 0): # Cuando ha encontrado al menos una pared (p)
+#            if(voxel_grid[target_point_x][target_point_y][target_point_z] < 0): # Si el sdf anterior es negativo
+#                los_result = check_line_of_sight(x_drone,y_drone,z_drone,target_point_x, target_point_y, target_point_z) # Checkea LOS
+#                if(los_result == 1): # Si hay línea de visión
+#                    voxel_grid[target_point_x][target_point_y][target_point_z] = sdf_prov_distance # El nuevo sdf es positivo
+#                else:                 # Si no
+#                    voxel_grid[target_point_x][target_point_y][target_point_z] = -sdf_prov_distance # El nuevo sdf es negativo
+#            else:
+#                voxel_grid[target_point_x][target_point_y][target_point_z] = sdf_prov_distance # Si ya era positivo antes, debe seguir siéndolo
+#            return
                 
-def update_sdf(voxel_grid_in):
+def update_sdf(x_drone,y_drone,z_drone, discrete_wall_coordinates):
+    global voxel_grid
     for i in range(voxel_grid.shape[0]):
         for j in range(voxel_grid.shape[1]):
             for k in range(voxel_grid.shape[2]):
-                if(voxel_grid_in[i][j][k] != 0):
-                    update_sdf_point(i,j,k,voxel_grid_in)
+                if(voxel_grid[i][j][k] != 0):
+                    update_sdf_point(i,j,k,voxel_grid,x_drone,y_drone,z_drone, discrete_wall_coordinates)
 
 # ----------------Declaración de la red ==> SIREN, 4 hidden layers con 256 neuronas, periodic (sinusoidal) activations, linear output layer, custom loss, custom initial weights
 device = (
@@ -280,6 +360,7 @@ def SIREN_Trainer(PC_msg):
     # ----------------Actualizar Voxfield con los puntos nuevos y obtener samples para el entrenamiento-----------------------
     N = 10000 # samples close to surface (dist < 5 cm)
     M = 30000 # samples away from surface
+    NM = 40000 # Total samples (temporal solution)
     
 
     # Initialize initial position if not already done
@@ -289,16 +370,29 @@ def SIREN_Trainer(PC_msg):
         z_ini = z_pos
 
     # Update voxel grid with new points
+    discrete_wall_coordinates = np.empty((0,3))
     for row in wall_coordinates:
-        x_wall_p = np.rint((wall_coordinates[row][0] - x_ini)/voxel_size) + voxel_grid_dim
-        y_wall_p = np.rint((wall_coordinates[row][1] - y_ini)/voxel_size) + voxel_grid_dim
-        z_wall_p = np.rint((wall_coordinates[row][2] - z_ini)/voxel_size) + voxel_grid_dim
-        voxel_grid[x_wall_p][y_wall_p][z_wall_p] = 0
+        x_wall_p = np.rint((row[0] - x_ini)/voxel_size) + voxel_grid_dim # Convert to grid coordinates
+        y_wall_p = np.rint((row[1] - y_ini)/voxel_size) + voxel_grid_dim
+        z_wall_p = np.rint((row[2] - z_ini)/voxel_size) + voxel_grid_dim
+        if (voxel_grid[x_wall_p][y_wall_p][z_wall_p] != 0): # If its a new obstacle (not detected before)
+            new_discrete_wall_point = np.array([x_wall_p, y_wall_p, z_wall_p])  
+            discrete_wall_coordinates = np.append(discrete_wall_coordinates,[new_discrete_wall_point], axis=0) # Store it in this list of points
+            voxel_grid[x_wall_p][y_wall_p][z_wall_p] = 0 # And set the sdf value to 0
     
-    update_sdf(voxel_grid)
+    update_sdf(voxel_grid, x_pos, y_pos, z_pos, discrete_wall_coordinates) # Update the sdf with the new points
 
-    # Sampling
+    # Sampling of the voxel grid
     
+    for samp in range(NM):
+        x_samp = np.random.randint(0,map_total_dim - 1)
+        y_samp = np.random.randint(0,map_total_dim - 1)
+        z_samp = np.random.randint(0,map_total_dim - 1)
+        x_coord = (x_samp - voxel_grid_dim) * voxel_size + x_ini
+        y_coord = (y_samp - voxel_grid_dim) * voxel_size + y_ini
+        z_coord = (z_samp - voxel_grid_dim) * voxel_size + z_ini
+        new_tp = np.array([x_coord, y_coord, z_coord, voxel_grid[x_samp][y_samp][z_samp]])
+        training_points = np.append(training_points,[new_tp], axis=0)
 
     # ----------------Obtener puntos locales a través de la estimación del SDF por fuerza bruta-------------------------------
     truncation_dist = 0.2 # max distance to consider local points
@@ -311,7 +405,7 @@ def SIREN_Trainer(PC_msg):
     rnd_ray = np.random.choice(range(0, pointcount), S, replace=False) # Takes random samples of available rays
     for k in rnd_ray: #For each ray
         wall_point = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2]]) # This is the wall point of that ray
-        for l in range(1,Q + 1): #For each point per ray
+        for l in range(Q): #For each point per ray
             dist_to_wall = random.uniform(-truncation_dist, truncation_dist)
             void_point = wall_point + ((wall_point-drone_pos)/np.linalg.norm(wall_point-drone_pos))*dist_to_wall # Coge puntos aleatorios a lo largo del rayo
             p_sdf_estimado, _ = pkdtree.query(void_point)
