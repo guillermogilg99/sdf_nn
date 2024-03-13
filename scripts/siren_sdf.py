@@ -1,4 +1,5 @@
-# ----------------Includes y variables globales
+#!/usr/bin/env python3
+
 import rospy
 from std_msgs.msg import String
 import numpy as np
@@ -9,6 +10,7 @@ from geometry_msgs.msg import PoseStamped
 from numpy import random
 from scipy.spatial import cKDTree
 import message_filters
+import matplotlib.pyplot as plt
 
 import os
 import torch
@@ -35,6 +37,7 @@ taken_wall_points = np.empty((0,4))
 
 #Topic selection variables
 num_topics = 0
+updated_points_counter = 0
 
 
 #Initialize variables
@@ -51,12 +54,13 @@ y_ini = np.nan
 z_ini = np.nan
 
 # ----------------Voxel map and functions definition 
-voxel_size = 0.01 # voxel size (m)
+voxel_size = 0.2 # voxel size (m)
 voxel_map_dim = 10 # voxel map radius (m) 
 
-voxel_grid_dim = voxel_map_dim / voxel_size # voxel map radius (in voxel numbers)
-map_total_dim = 2*voxel_grid_dim + 1 # voxel map dimension (in voxel numbers)
+voxel_grid_dim = int(voxel_map_dim / voxel_size) # voxel map radius (in voxel numbers)
+map_total_dim = int(2*voxel_grid_dim + 1) # voxel map dimension (in voxel numbers)
 voxel_grid = np.full((map_total_dim,map_total_dim, map_total_dim), -1000)
+total_points = map_total_dim**3
 
 def check_line_of_sight(x_ini,y_ini,z_ini,x_last,y_last,z_last): # Returns 1 if line of sight exists, 0 otherwise
 
@@ -86,9 +90,18 @@ def check_line_of_sight(x_ini,y_ini,z_ini,x_last,y_last,z_last): # Returns 1 if 
     z_act = z_ini
 
     while (x_act, y_act, z_act) != (x_last, y_last, z_last):
-        x_coef = cont_x/(dx*2)
-        y_coef = cont_y/(dy*2)
-        z_coef = cont_z/(dz*2)
+        if (dx != 0):
+            x_coef = cont_x/(dx*2)
+        else:
+            x_coef = 1.1
+        if (dy != 0):
+            y_coef = cont_y/(dy*2)
+        else:
+            y_coef = 1.1
+        if (dz != 0):
+            z_coef = cont_z/(dz*2)
+        else:
+            z_coef = 1.1
 
         if (x_coef <= y_coef and x_coef <= z_coef):
             x_act += sx
@@ -107,11 +120,11 @@ def check_line_of_sight(x_ini,y_ini,z_ini,x_last,y_last,z_last): # Returns 1 if 
 
 def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_drone, z_drone, discrete_wall_coordinates):
     # Comparar cada punto con los obstáculos nuevos y actualizarlo si el valor absoluto es menor con las nuevas paredes
-    global voxel_grid
+    global voxel_grid, updated_points_counter, total_points
     sdf_prov_distance = np.nan # Inicializo la variable para guardar el sdf
     for row in discrete_wall_coordinates: # Por cada nuevo obstáculo detectado
         dist_to_obstacle = np.sqrt((target_point_x - row[0])**2 + (target_point_y - row[1])**2 + (target_point_z - row[2])**2) * voxel_size
-        if (sdf_prov_distance == np.nan or dist_to_obstacle < sdf_prov_distance): # Si es el primer punto o el nuevo punto está más cerca que los anteriores
+        if (np.isnan(sdf_prov_distance) or dist_to_obstacle < sdf_prov_distance): # Si es el primer punto o el nuevo punto está más cerca que los anteriores
             sdf_prov_distance = dist_to_obstacle # Actualizo el sdf estimado
 
     # Una vez terminado se comprueba el signo
@@ -123,7 +136,9 @@ def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_
             voxel_grid[target_point_x][target_point_y][target_point_z] = -sdf_prov_distance # El nuevo sdf es negativo
     else:
         voxel_grid[target_point_x][target_point_y][target_point_z] = sdf_prov_distance # Si ya era positivo antes, debe seguir siéndolo
-    return
+    
+    #updated_points_counter += 1
+    #print("Updated points: ", updated_points_counter, "/", total_points)
 
 
 #DEPRECATED def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_drone, z_drone):
@@ -170,12 +185,14 @@ def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_
 #            return
                 
 def update_sdf(x_drone,y_drone,z_drone, discrete_wall_coordinates):
-    global voxel_grid
+    global voxel_grid, updated_points_counter
+    updated_points_counter = 0
     for i in range(voxel_grid.shape[0]):
         for j in range(voxel_grid.shape[1]):
             for k in range(voxel_grid.shape[2]):
                 if(voxel_grid[i][j][k] != 0):
-                    update_sdf_point(i,j,k,voxel_grid,x_drone,y_drone,z_drone, discrete_wall_coordinates)
+                    update_sdf_point(i,j,k,x_drone,y_drone,z_drone, discrete_wall_coordinates)
+    print("SDF Updated Successfully")
 
 # ----------------Declaración de la red ==> SIREN, 4 hidden layers con 256 neuronas, periodic (sinusoidal) activations, linear output layer, custom loss, custom initial weights
 device = (
@@ -362,25 +379,42 @@ def SIREN_Trainer(PC_msg):
     M = 30000 # samples away from surface
     NM = 40000 # Total samples (temporal solution)
     
-
     # Initialize initial position if not already done
-    if (x_ini == np.nan and y_ini == np.nan and z_ini == np.nan):
+    global x_ini, y_ini, z_ini
+    
+    print("x_ini =", x_ini, "y_ini =", y_ini, "z_ini =", z_ini)
+
+    if (np.isnan(x_ini) and np.isnan(y_ini) and np.isnan(z_ini)): 
         x_ini = x_pos
         y_ini = y_pos
         z_ini = z_pos
+        print("Initialized the points bruh", x_ini, y_ini, z_ini)
+        
 
     # Update voxel grid with new points
     discrete_wall_coordinates = np.empty((0,3))
     for row in wall_coordinates:
-        x_wall_p = np.rint((row[0] - x_ini)/voxel_size) + voxel_grid_dim # Convert to grid coordinates
-        y_wall_p = np.rint((row[1] - y_ini)/voxel_size) + voxel_grid_dim
-        z_wall_p = np.rint((row[2] - z_ini)/voxel_size) + voxel_grid_dim
-        if (voxel_grid[x_wall_p][y_wall_p][z_wall_p] != 0): # If its a new obstacle (not detected before)
-            new_discrete_wall_point = np.array([x_wall_p, y_wall_p, z_wall_p])  
-            discrete_wall_coordinates = np.append(discrete_wall_coordinates,[new_discrete_wall_point], axis=0) # Store it in this list of points
-            voxel_grid[x_wall_p][y_wall_p][z_wall_p] = 0 # And set the sdf value to 0
-    
-    update_sdf(voxel_grid, x_pos, y_pos, z_pos, discrete_wall_coordinates) # Update the sdf with the new points
+        x_wall_p = int(np.rint((row[0] - x_ini)/voxel_size) + voxel_grid_dim) # Convert to grid coordinates
+        y_wall_p = int(np.rint((row[1] - y_ini)/voxel_size) + voxel_grid_dim)
+        z_wall_p = int(np.rint((row[2] - z_ini)/voxel_size) + voxel_grid_dim)
+        print("Wall in ", x_wall_p, y_wall_p, z_wall_p)
+        if(0 <= x_wall_p < map_total_dim and 0 <= y_wall_p < map_total_dim and 0 <= z_wall_p < map_total_dim):
+            if (voxel_grid[x_wall_p][y_wall_p][z_wall_p] != 0): # If its a new obstacle (not detected before)
+                new_discrete_wall_point = np.array([x_wall_p, y_wall_p, z_wall_p])  
+                discrete_wall_coordinates = np.append(discrete_wall_coordinates,[new_discrete_wall_point], axis=0) # Store it in this list of points
+                voxel_grid[x_wall_p][y_wall_p][z_wall_p] = 0 # And set the sdf value to 0
+    #Convert drone position to grid position
+    x_pos_grid = int(np.rint((x_pos - x_ini)/voxel_size) + voxel_grid_dim)
+    y_pos_grid = int(np.rint((y_pos - y_ini)/voxel_size) + voxel_grid_dim)
+    z_pos_grid = int(np.rint((z_pos - z_ini)/voxel_size) + voxel_grid_dim)
+    update_sdf(x_pos_grid, y_pos_grid, z_pos_grid, discrete_wall_coordinates) # Update the sdf with the new points
+
+    # Printing a cut from the new SDF grid
+    grid_cut = voxel_grid[:, :, voxel_grid_dim]
+    plt.imshow(grid_cut, cmap='viridis', interpolation='nearest')
+    plt.colorbar()  # Add a colorbar to show the scale
+    plt.title(f"Z-Cut at z_index={voxel_grid_dim}")
+    plt.show()
 
     # Sampling of the voxel grid
     
@@ -445,13 +479,19 @@ def SIREN_Trainer(PC_msg):
         for batch in train_loader:
             inputs, targets = batch
             targets = targets.view(-1,1)
+
+            # Zero the parameter gradients
             optimizer.zero_grad()
+
+            # Forward pass
             outputs = siren_model(inputs)
         
             # Compute gradients of the outputs w.r.t. the inputs
             inputs.requires_grad = True
-            grad_output = torch.autograd.grad(outputs, inputs, grad_outputs=torch.ones_like(outputs), create_graph=True)[0]
+            grad_output = torch.autograd.grad(outputs=outputs, inputs=inputs, grad_outputs=torch.ones_like(outputs), create_graph=True, allow_unused=True)[0]
 
+            print(grad_output)
+            print(" Gradiente hecho ")
             loss = criterion(outputs, targets, grad_output)
             loss.backward()
             optimizer.step()
@@ -492,6 +532,7 @@ def main():
         POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
         ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=1000000, slop=0.1)
         ts.registerCallback(PC_POS_callback_2topics)
+        print("Expecting /velodyne_points and /ground_truth_to_tf/pose")
 
     elif topic_selector == 1:
         topic_name_PC = "/os1_cloud_node1/points"
@@ -500,6 +541,7 @@ def main():
         POS_sub = message_filters.Subscriber(topic_name_POS, PoseStamped)
         ts = message_filters.ApproximateTimeSynchronizer([PC_sub, POS_sub], queue_size=10000000, slop=0.1)
         ts.registerCallback(PC_POS_callback_2topics)
+        print("Expecting /os1_cloud_node1/points and /leica/pose/relative")
     else:
         print("Error: topic_selector value is not supported")
 
