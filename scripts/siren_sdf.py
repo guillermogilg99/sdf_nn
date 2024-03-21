@@ -30,7 +30,7 @@ f_voxel_grid_cut = 0
 f_occupancy_grid_cut = 0
 f_training_points = 0
 f_certain_training_points = 1
-tp_print_limit = 0.1
+tp_print_limit = 1.9
 f_sdf_tp_distribution = 0
 
 
@@ -280,7 +280,7 @@ def PC_POS_callback_2topics(PC_msg, POS_msg):
 def SIREN_Trainer(PC_msg):
     #----------------Parameters------------------------------------------------------------------
     dist_between_iter = 0.1 # Meters between two training iterations
-    lidar_lim_max = 25 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
+    lidar_lim_max = 10 # Radius of the circle, centered in the drone, where LiDAR points are taken into account (meters)
     lidar_lim_min = 0.3
     num_epochs = 10 # NN hyperparameter
     batch_size = 64 # NN hyperparameter
@@ -413,6 +413,8 @@ def SIREN_Trainer(PC_msg):
         #Create the kdTree for the next step
         pkdtree = cKDTree(total_wall_point_list)
 
+        if (pointcount < S):
+            S = pointcount
         rnd_ray = np.random.choice(range(0, pointcount), S, replace=False) # Takes random samples of available rays
         for k in rnd_ray: #For each ray
             wall_point = np.array([wall_coordinates[k][0], wall_coordinates[k][1], wall_coordinates[k][2]]) # This is the wall point of that ray
