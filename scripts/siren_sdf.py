@@ -21,7 +21,10 @@ from siren_pytorch import SirenNet
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
-import plotly.graph_objs as go 
+import plotly.graph_objs as go
+
+# Custom includes
+
 
 # ======== FLAGS ========
 
@@ -29,7 +32,7 @@ f_print_lidar_points = 0
 f_voxel_grid_cut = 0
 f_occupancy_grid_cut = 0
 f_training_points = 0
-f_certain_training_points = 1
+f_certain_training_points = 0
 tp_print_limit = 1.9
 f_sdf_tp_distribution = 0
 
@@ -41,6 +44,7 @@ training_positions = np.empty((0,3)) # List of drone positions where training wa
 training_points = np.empty((0,4)) # Training points list
 num_topics = 0 # Topic selection variable
 updated_points_counter = 0 # Updated points counter
+iters = 0 # Number of training iterations already done
 
 Q = np.array([1, 0, 0, 0])
 Q_last = np.array([1, 0, 0, 0])
@@ -55,7 +59,7 @@ y_ini = np.nan
 z_ini = np.nan
 
 #Voxel map and functions definition 
-voxel_size = 0.2 # voxel size (m)
+voxel_size = 1 # voxel size (m)
 voxel_map_dim = 5 # voxel map radius (m) 
 voxel_grid_dim = int(voxel_map_dim / voxel_size) # voxel map radius (in voxel numbers)
 map_total_dim = int(2*voxel_grid_dim + 1) # voxel map dimension (in voxel numbers)
@@ -203,59 +207,229 @@ device = (
 )
 print(f"Using {device} device")
 
-class SIREN(nn.Module):
-    def __init__(self, input_dim=3, hidden_dim=256, hidden_layers=4, output_dim=1, omega_0=10):
-        super(SIREN, self).__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.hidden_layers = hidden_layers
-        self.output_dim = output_dim
-        self.omega_0 = omega_0
+class Sine(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-        self.layers = nn.ModuleList()
-        self.layers.append(nn.Linear(self.input_dim, self.hidden_dim))
-        for _ in range(self.hidden_layers - 1):
-            self.layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
-        self.layers.append(nn.Linear(self.hidden_dim, self.output_dim))
+    def forward(self, input):
+        return torch.sin(10 * input)
 
-        self.init_weights()
+class FCNetWork(nn.Module): # Fully connected generic neural network definition (can be expanded with new nonlinearities)
+    def __init__(
+            self,
+            in_features,
+            out_features,
+            n_hidden_layers,
+            hidden_features,
+            outermost_linear = False,
+            nonlinear_type = 'relu',
+            weight_init_mode = None
+        ):
+        super().__init__()
 
-    def init_weights(self):
-        for layer in self.layers:
-            n = layer.in_features
-            std = (6 / n) ** 0.5 / self.omega_0
-            torch.nn.init.uniform_(layer.weight, -std, std)
-            torch.nn.init.zeros_(layer.bias)
+        self.first_layer_init = None
 
-    def forward(self, x):
-        x = x * self.omega_0
-        for layer in self.layers[:-1]:
-            x = torch.sin(layer(x))
-        x = self.layers[-1](x)
-        return x
+        # Dictionary for nonlinearity types (including weight init and, if needed, first-layer init)
 
-class CustomLoss(nn.Module): # Declare custom loss function (LossTotal = lambda_SDF*LossSDF + lambda_eikonal*LossEikonal)
-    def __init__(self, lambda_SDF, lambda_eikonal):
-        super(CustomLoss, self).__init__()
-        self.lambda_SDF = lambda_SDF
-        self.lambda_eikonal = lambda_eikonal
+        nl_inits = {'sine':(Sine(), sine_init, None),
+                    'relu':(nn.ReLU(inplace=True), init_weights_normal, None)}
+        
+        nl, nl_weight_init, fl_init = nl_inits[nonlinear_type]
 
-    def forward(self, output, target, grad_output):
-        # LossSDF (Difference between estimation and real value)
-        loss_sdf = torch.mean(torch.abs(output - target))
+        if weight_init_mode is not None:
+            self.weight_init_mode = weight_init_mode
+        else:
+            self.weight_init_mode = nl_weight_init
+        
+        # Net construction
+        
+        self.net = [] # Starts with an empty net
+        self.net.append(nn.Sequential(nn.Linear(in_features, hidden_features), nl)) # Adds the first layers (linear + nonlinear activation)
 
-        # LossEikonal (Difference between norm of the estimated gradient and 1)
-        grad_norm = torch.norm(grad_output, p=2, dim=1)
-        loss_eikonal = torch.mean(torch.abs(grad_norm - 1))
+        for i in range(n_hidden_layers):        # Adds intermediate layers
+            self.net.append(nn.Sequential(nn.Linear(hidden_features, hidden_features), nl))
 
-        # Combine both losses with constants lambda_SDF and lambda_eikonal
-        total_loss = self.lambda_SDF * loss_sdf + self.lambda_eikonal * loss_eikonal
-        return total_loss
+        if outermost_linear:            # Adds the last layer (linear or with a nonlinear activation)
+            self.net.append(nn.Sequential(nn.Linear(hidden_features, out_features)))
+        else:
+            self.net.append(nn.Sequential(nn.Linear(hidden_features, out_features), nl))
+
+        self.net = nn.Sequential(*self.net) # Wraps the net into a Sequential container
+
+        # Applies the desired weight initialization (if defined)
+
+        if self.weight_init_mode is not None:
+            self.net.apply(self.weight_init_mode)
+
+        # Applies first layer initialization (if defined)
+
+        if fl_init is not None:
+            self.net[0].apply(fl_init)
     
+    def forward(self, input):
+        return self.net(input)
+
+# ---INITIALIZATION METHODS----
+    
+def init_weights_normal(m):
+    if type(m) == nn.Linear:
+        if hasattr(m, 'weight'):
+            nn.init.kaiming_normal_(m.weight, a=0.0, nonlinearity='relu', mode='fan_in')
+
+def sine_init(m):
+    with torch.no_grad(): # Deactivates the auto_grad tracking for this operation (needed if using autograd later in the code)
+        if hasattr(m, 'weight'):
+            n_inputs = m.weight.size(-1)
+            m.weight.uniform_(-np.sqrt(6/n_inputs)/10, np.sqrt(6/n_inputs)/10)
+    
+# ----------------------------
+    
+class SIREN(nn.Module):
+
+    def __init__(
+            self,
+            in_features = 3,
+            out_features = 1,
+            type = 'sine',
+            hidden_features = 256,
+            n_hidden_layers = 4,
+        ):
+        super().__init__()
+
+        self.net = FCNetWork(
+            in_features = in_features,
+            out_features = out_features,
+            n_hidden_layers = n_hidden_layers,
+            hidden_features = hidden_features,
+            outermost_linear = True,
+            nonlinear_type = type
+        )
+
+        print(self)
+    
+    def forward(self, input):
+        return self.net(input)
+
 # Create the model
-siren_model = SIREN(input_dim=3, hidden_dim=256, hidden_layers=4, output_dim=1, omega_0=10).to(device)
-siren_model.train()
-print(siren_model)
+#siren_model = SIREN(input_dim=3, hidden_dim=256, hidden_layers=4, output_dim=1, omega_0=10).to(device)
+siren_model = SIREN().to(device)
+
+# ========= TRAINING DEFINITIONS =========
+class Dataset(torch.utils.data.Dataset): # Structure to save collected data
+    def __init__(self, data, dtype = torch.float, device = 'cuda'):
+        self.dtype = dtype
+        self.device = device
+        self.pc_data = data[:, :3]   # Pointcloud info
+        self.sdf_data = data[:, 3]  # SDF
+    
+    def __getitem__(self, index):
+        point = self.pc_data[index,:]
+        sdf = self.sdf_data[index]
+        return point, sdf
+    
+    def __len__(self):
+        return len(self.pc_data)
+    
+    def update_dataset(self, data):
+        self.pc_data = data[:, :3]   # Pointcloud info
+        self.sdf_data = data[:, 3]  # SDF
+
+def sdf_loss(sdf, target_sdf):
+    return torch.abs(sdf-target_sdf)
+
+def eikonal_loss(grad_sdf):
+    return torch.abs(torch.norm(grad_sdf, dim= -1, keepdim= True) - 1)
+
+class SDFTrainer(): # Trainer class that gets called during training
+    def __init__(
+        self,
+        learning_rate = 0.0004,
+        weight_decay = 0.012,
+        sdf_loss_weight = 5.0,
+        eikonal_loss_weight = 2.0,
+        device = 'cuda',
+        dtype = torch.float,
+    ):
+        # Device
+        self.device = device
+        self.dtype = dtype
+
+        # Optimization params
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+
+        # Loss params
+        self.sdf_loss_weight = sdf_loss_weight
+        self.eikonal_loss_weight = eikonal_loss_weight
+
+        # Model declaration
+        self.model = SIREN()
+        self.model.to(self.device)
+        self.model.train()
+
+        # Dataset
+        init_data_rand = torch.rand(1000,7)
+        self.dataset = Dataset(init_data_rand, dtype = self.dtype, device = self.device)
+
+        # Training optimizer
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr= self.learning_rate, weight_decay= self.weight_decay)
+
+        # Loss init
+        self.losses = []
+
+    def update_dataset(self, new_data):
+        self.dataset.update_dataset(new_data)
+    
+
+    def training_step(self, epochs = 50):
+        epoch = 0
+
+        batch_points = self.dataset.pc_data
+        batch_sdf = self.dataset.sdf_data
+        batch_points.requires_grad_()
+
+        while epoch < epochs:
+            
+            self.optimizer.zero_grad()
+
+            # Compute SDF preds and targets
+            sdf_preds = self.model(batch_points)
+            target_sdf_preds = batch_sdf
+
+            # Compute grads
+            sdf_gradient_preds = torch.autograd.grad(outputs=sdf_preds,
+                                                        inputs=batch_points,
+                                                        grad_outputs=torch.ones_like(sdf_preds, requires_grad=False, device=sdf_preds.device),
+                                                        create_graph=True,
+                                                        retain_graph=True,
+                                                        only_inputs=True
+                                                        )[0]
+            
+            # Compute loss
+            self.total_sdf_loss = sdf_loss(sdf_preds, target_sdf_preds)
+            self.total_eikonal_loss = eikonal_loss(sdf_gradient_preds)
+            self.total_loss = self.sdf_loss_weight * torch.mean(self.total_sdf_loss) + self.eikonal_loss_weight * torch.mean(self.total_eikonal_loss)
+            self.total_loss.backward()
+
+            # Update weights
+            self.optimizer.step()
+
+            # Append loss
+            self.losses.append(self.total_sdf_loss.mean().detach().cpu().numpy())
+
+            epoch = epoch + 1
+
+        return self.losses[-1]
+
+# Initialize trainer
+
+global_sdf_trainer = SDFTrainer(
+    learning_rate= 4e-4,
+    weight_decay= 0.012,
+    sdf_loss_weight= 5.0,
+    eikonal_loss_weight= 2.0,
+    device= 'cuda'
+)
 
 
 # ======== MAIN MESSAGE HANDLER AND TRAINING LOOP ========
@@ -290,7 +464,7 @@ def SIREN_Trainer(PC_msg):
     weight_decay = 0.012
     #num_val_points = 100 # Validation points to be considered between epochs
 
-    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, training_points, training_positions
+    global x_pos, y_pos, z_pos, x_last, y_last, z_last, Q, Q_last, total_wall_point_list, training_points, training_positions, global_sdf_trainer, iters
 
     acos_arg = np.abs(Q[0]*Q_last[0]+Q[1]*Q_last[1]+Q[2]*Q_last[2]+Q[3]*Q_last[3])
     if(acos_arg > 1):
@@ -305,13 +479,6 @@ def SIREN_Trainer(PC_msg):
         dist_to_closest_tp, _ = tpkdtree.query(drone_pos) # Checks distance to the closest training position
     if(dist_to_closest_tp > dist_between_iter):
         training_positions = np.append(training_positions, [drone_pos], axis=0) # Add this position to the list of positions where training was performed
-        #print("x =", x_pos)
-        #print("y =", y_pos)
-        #print("z =", z_pos)
-        #dist_dif = np.sqrt((x_pos-x_last)**2 + (y_pos-y_last)**2 + (z_pos-z_last)**2)
-        #ang_dif = 180/np.pi*np.arccos(acos_arg)
-        #print("distance dif =", dist_dif)
-        #print("angle dif =", ang_dif)
         R = RotQuad(Q) #Matriz de rotación del dron
         x_last = x_pos
         y_last = y_pos
@@ -334,8 +501,6 @@ def SIREN_Trainer(PC_msg):
             fig_walls = go.Figure(data=[go.Scatter3d(x=wall_coordinates[:,0], y=wall_coordinates[:,1], z=wall_coordinates[:,2], mode='markers', marker=dict(size=5))])
             fig_walls.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
             fig_walls.show()
-
-
 
         training_points = np.empty((0,4)) # Reset the training points
 
@@ -389,9 +554,6 @@ def SIREN_Trainer(PC_msg):
             plt.colorbar()  # Add a colorbar to show the scale
             plt.title(f"Z-Cut at z_index={voxel_grid_dim}")
             plt.show()
-
-        
-
 
         # Sampling of the voxel grid
         
@@ -479,10 +641,8 @@ def SIREN_Trainer(PC_msg):
 
             plt.show()
 
-        # POR QUÉ NO HAY NINGUNO A 0.5? HACER GRÁFICA DE BARRAS DE LOS VALORES DEL SDF
         # --PLOT DISTRIBUCIÓN DE VALORES SDF DE LOS PUNTOS DE ENTRENAMIENTO
         if (f_sdf_tp_distribution == 1):
-            #distribution_objective = training_points[:, 3]  # Selecting the fourth column
             distribution_objective = voxel_grid.flatten()
             plt.hist(distribution_objective, bins=70, color='blue', alpha=0.7)  # Adjust bins as needed
             plt.title('Distribution of SDF Values')
@@ -494,56 +654,86 @@ def SIREN_Trainer(PC_msg):
 
 
         # ----------------Entrenamiento de la SIREN--------------------------------------------------------------------------------
-        criterion = CustomLoss(lambda_SDF, lambda_eikonal)
-        optimizer = optim.Adam(siren_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            
+        # Training params
+        epochs_warmstart = 50
+        epochs_nominal = 10
+        iter_warmstart = 5
+            
+        # Update dataset of SDF trainer
+        training_points_torch = torch.from_numpy(training_points).to(dtype = torch.float, device='cuda')
+        print('Training points torch', training_points_torch)
+        global_sdf_trainer.update_dataset(training_points_torch)
+
+        # Determine epochs
+        current_epochs = epochs_warmstart if (iters < iter_warmstart) else epochs_nominal
+        iters = iters + 1
+
+        # Train
+        _ = global_sdf_trainer.training_step(epochs = current_epochs)
+
+
+
+
+
+
+
+
+
+
+
+        #criterion = CustomLoss(lambda_SDF, lambda_eikonal)
+        #optimizer = optim.Adam(siren_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
         # Load dataset (X_input, y_output) and move them to the GPU (if able). Then convert to float32 (expected by the NN)
-        X_input_batch = torch.tensor(training_points[:, :3])
-        y_output_batch = torch.tensor(training_points[:,3])
-        print(X_input_batch)
-        print(y_output_batch)
-        X_input_batch = X_input_batch.to(device)
-        y_output_batch = y_output_batch.to(device)
-        X_input_batch = X_input_batch.to(torch.float32)
-        y_output_batch = y_output_batch.to(torch.float32)
-        print("X_input_batch dtype:", X_input_batch.dtype)
-        print("y_output_batch dtype:", y_output_batch.dtype)
+        #X_input_batch = torch.tensor(training_points[:, :3])
+        #y_output_batch = torch.tensor(training_points[:,3])
+        #print(X_input_batch)
+        #print(y_output_batch)
+        #X_input_batch = X_input_batch.to(device)
+        #y_output_batch = y_output_batch.to(device)
+        #X_input_batch = X_input_batch.to(torch.float32)
+        #y_output_batch = y_output_batch.to(torch.float32)
+        #print("X_input_batch dtype:", X_input_batch.dtype)
+        #print("y_output_batch dtype:", y_output_batch.dtype)
 
         # Create the DataLoader
-        point_dataset = TensorDataset(X_input_batch, y_output_batch)
-        train_loader = DataLoader(point_dataset, batch_size=batch_size, shuffle=True)
+        #point_dataset = TensorDataset(X_input_batch, y_output_batch)
+        #train_loader = DataLoader(point_dataset, batch_size=batch_size, shuffle=True)
 
 
         # Train the model
-        for epoch in range(num_epochs):
-            running_loss = 0.0
+        #for epoch in range(num_epochs):
+            #running_loss = 0.0
             #val_mse_total = 0.0
 
 
-            for batch in train_loader:
-                inputs, targets = batch
-                targets = targets.view(-1,1)
+            #for batch in train_loader:
+                #inputs, targets = batch
+                #targets = targets.view(-1,1)
 
                 # Zero the parameter gradients
-                optimizer.zero_grad()
+                #optimizer.zero_grad()
 
                 # Forward pass
-                outputs = siren_model(inputs)
+                #outputs = siren_model(inputs)
             
                 # Compute gradients of the outputs w.r.t. the inputs
-                inputs.requires_grad = True
-                #grad_output = torch.autograd.grad(outputs=siren_model(inputs), inputs=inputs, grad_outputs=torch.ones_like(outputs), create_graph=True, allow_unused=True)[0]
-                grad_output = torch.autograd.grad(outputs=siren_model(inputs), inputs=inputs, grad_outputs=torch.ones_like(outputs), create_graph=True)[0]
-                #print("Forma del input: ", inputs.shape)
-                #print("Forma del output:", outputs.shape)
-                #print("Forma del gradiente:", grad_output.shape)
-                
-                #print(" Gradiente hecho ")
-                loss = criterion(outputs, targets, grad_output)
-                loss.backward()
-                optimizer.step()
+                #inputs.requires_grad = True
+                #grad_output = torch.autograd.grad(outputs=siren_model(inputs), inputs=inputs, grad_outputs=torch.ones_like(outputs), create_graph=True)[0]
+                #grad_output = torch.autograd.grad(outputs=siren_model(inputs), 
+                                                  #inputs=inputs, 
+                                                  #grad_outputs=torch.ones_like(outputs, requires_grad=False, device=outputs.device), 
+                                                  #create_graph=True,
+                                                  #retain_graph=True,
+                                                  #only_inputs=True)[0]
 
-                running_loss += loss.item()
+                #print(" Gradiente hecho ")
+                #loss = criterion(outputs, targets, grad_output)
+                #loss.backward()
+                #optimizer.step()
+
+                #running_loss += loss.item()
             
             # Check validation each epoch
             #for k in range(num_val_points):
@@ -555,7 +745,7 @@ def SIREN_Trainer(PC_msg):
             #val_mse_total = val_mse_total/num_val_points
 
             #print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)} ValLoss: {val_mse_total}')
-            print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)}')
+            #print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)}')
 
         # Save the trained model if needed
         torch.save(siren_model.state_dict(), 'siren_model.pth')
