@@ -31,6 +31,8 @@ import plotly.graph_objs as go
 f_print_lidar_points = 0
 f_voxel_grid_cut = 0
 f_occupancy_grid_cut = 0
+f_voxel_grid_complete = 0
+f_voxel_grid_complete_neg_pos = 1
 f_training_points = 0
 f_certain_training_points = 0
 tp_print_limit = 1.9
@@ -59,7 +61,7 @@ y_ini = np.nan
 z_ini = np.nan
 
 #Voxel map and functions definition 
-voxel_size = 1 # voxel size (m)
+voxel_size = 0.2 # voxel size (m)
 voxel_map_dim = 5 # voxel map radius (m) 
 voxel_grid_dim = int(voxel_map_dim / voxel_size) # voxel map radius (in voxel numbers)
 map_total_dim = int(2*voxel_grid_dim + 1) # voxel map dimension (in voxel numbers)
@@ -177,7 +179,7 @@ def update_sdf_point(target_point_x, target_point_y, target_point_z, x_drone, y_
         voxel_grid[target_point_x][target_point_y][target_point_z] = sdf_prov_distance # Si ya era positivo antes, debe seguir siéndolo
     
     updated_points_counter += 1
-    print("Updated points: ", updated_points_counter, "/", total_points)
+    print("Updated points: ", updated_points_counter, "/", total_points, '|| Point updated to:', voxel_grid[target_point_x,target_point_y,target_point_z])
                 
 def update_sdf(x_drone,y_drone,z_drone, discrete_wall_coordinates):
     global voxel_grid, updated_points_counter
@@ -349,6 +351,7 @@ class SDFTrainer(): # Trainer class that gets called during training
         eikonal_loss_weight = 2.0,
         device = 'cuda',
         dtype = torch.float,
+        batch_size = 64
     ):
         # Device
         self.device = device
@@ -370,6 +373,8 @@ class SDFTrainer(): # Trainer class that gets called during training
         # Dataset
         init_data_rand = torch.rand(1000,7)
         self.dataset = Dataset(init_data_rand, dtype = self.dtype, device = self.device)
+        self.batch_size = batch_size
+
 
         # Training optimizer
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr= self.learning_rate, weight_decay= self.weight_decay)
@@ -382,41 +387,50 @@ class SDFTrainer(): # Trainer class that gets called during training
     
 
     def training_step(self, epochs = 50):
+        print('Dataset size:', self.dataset.pc_data.size())
         epoch = 0
 
-        batch_points = self.dataset.pc_data
-        batch_sdf = self.dataset.sdf_data
-        batch_points.requires_grad_()
+        sdf_tensor_dataset = TensorDataset(torch.tensor(self.dataset.pc_data, dtype=self.dtype), torch.tensor(self.dataset.sdf_data, dtype = self.dtype))
+        sdf_dataloader = DataLoader(sdf_tensor_dataset, batch_size = self.batch_size, shuffle = True)
+        
+        #batch_points = self.dataset.pc_data
+        #batch_sdf = self.dataset.sdf_data
+        #batch_points.requires_grad_()
 
         while epoch < epochs:
+            epoch_loss = []
+            for batch_points, batch_sdf in sdf_dataloader:
+
+                batch_points.requires_grad_()
             
-            self.optimizer.zero_grad()
+                self.optimizer.zero_grad()
 
-            # Compute SDF preds and targets
-            sdf_preds = self.model(batch_points)
-            target_sdf_preds = batch_sdf
+                # Compute SDF preds and targets
+                sdf_preds = self.model(batch_points)
+                target_sdf_preds = batch_sdf
 
-            # Compute grads
-            sdf_gradient_preds = torch.autograd.grad(outputs=sdf_preds,
-                                                        inputs=batch_points,
-                                                        grad_outputs=torch.ones_like(sdf_preds, requires_grad=False, device=sdf_preds.device),
-                                                        create_graph=True,
-                                                        retain_graph=True,
-                                                        only_inputs=True
-                                                        )[0]
-            
-            # Compute loss
-            self.total_sdf_loss = sdf_loss(sdf_preds, target_sdf_preds)
-            self.total_eikonal_loss = eikonal_loss(sdf_gradient_preds)
-            self.total_loss = self.sdf_loss_weight * torch.mean(self.total_sdf_loss) + self.eikonal_loss_weight * torch.mean(self.total_eikonal_loss)
-            self.total_loss.backward()
+                # Compute grads
+                sdf_gradient_preds = torch.autograd.grad(outputs=sdf_preds,
+                                                            inputs=batch_points,
+                                                            grad_outputs=torch.ones_like(sdf_preds, requires_grad=False, device=sdf_preds.device),
+                                                            create_graph=True,
+                                                            retain_graph=True,
+                                                            only_inputs=True
+                                                            )[0]
+                
+                # Compute loss
+                self.total_sdf_loss = sdf_loss(sdf_preds, target_sdf_preds)
+                self.total_eikonal_loss = eikonal_loss(sdf_gradient_preds)
+                self.total_loss = self.sdf_loss_weight * torch.mean(self.total_sdf_loss) + self.eikonal_loss_weight * torch.mean(self.total_eikonal_loss)
+                self.total_loss.backward()
 
-            # Update weights
-            self.optimizer.step()
+                # Update weights
+                self.optimizer.step()
 
-            # Append loss
-            self.losses.append(self.total_sdf_loss.mean().detach().cpu().numpy())
-
+                # Append loss
+                self.losses.append(self.total_sdf_loss.mean().detach().cpu().numpy())
+                epoch_loss.append(self.total_loss)
+            print('Training epoch ',epoch + 1,'/',epochs,'|| Loss:',torch.tensor(epoch_loss).mean())
             epoch = epoch + 1
 
         return self.losses[-1]
@@ -495,6 +509,7 @@ def SIREN_Trainer(PC_msg):
                 total_wall_point_list = np.append(total_wall_point_list, [pglobal], axis=0)
                 pointcount = pointcount + 1
         print("pointcount =", pointcount)
+        print("wall_coordinates =", wall_coordinates)
 
         # --PRINT LIDAR POINTS-- #
         if (f_print_lidar_points == 1):
@@ -530,11 +545,11 @@ def SIREN_Trainer(PC_msg):
                     new_discrete_wall_point = np.array([x_wall_p, y_wall_p, z_wall_p])  
                     discrete_wall_coordinates = np.append(discrete_wall_coordinates,[new_discrete_wall_point], axis=0) # Store it in this list of points
                     voxel_grid[x_wall_p][y_wall_p][z_wall_p] = 0 # And set the sdf value to 0
-
         # Convert drone position to grid position and update the sdf estimation
         x_pos_grid = int(np.rint((x_pos - x_ini)/voxel_size) + voxel_grid_dim)
         y_pos_grid = int(np.rint((y_pos - y_ini)/voxel_size) + voxel_grid_dim)
         z_pos_grid = int(np.rint((z_pos - z_ini)/voxel_size) + voxel_grid_dim)
+        print(wall_coordinates)
         update_sdf(x_pos_grid, y_pos_grid, z_pos_grid, discrete_wall_coordinates) # Update the sdf with the new points
 
         update_occupancy(discrete_wall_coordinates) # Update the sdf with the new points
@@ -546,6 +561,58 @@ def SIREN_Trainer(PC_msg):
             plt.colorbar()  # Add a colorbar to show the scale
             plt.title(f"Z-Cut at z_index={voxel_grid_dim}")
             plt.show()
+        
+        # --PLOT COMPLETE VOXEL GRID-- #
+        if (f_voxel_grid_complete == 1):
+            # Create point list
+            voxel_p_list = np.empty((0,4))
+            for i in range(voxel_grid.shape[0]):
+                for j in range(voxel_grid.shape[1]):
+                    for k in range(int(np.floor(voxel_grid.shape[2]/3)), int(np.floor(voxel_grid.shape[2]/3*2))):
+                        new_p = np.array([i, j, k, voxel_grid[i][j][k]])
+                        voxel_p_list = np.append(voxel_p_list,[new_p], axis=0)
+            
+            # Create a 3D plot
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Plot points with colors based on values
+            ax.scatter(voxel_p_list[:, 0], voxel_p_list[:, 1], voxel_p_list[:, 2], c=voxel_p_list[:, 3], cmap='viridis', s=300)
+
+            # Set labels
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+
+            # Show plot
+            plt.show()
+        
+        # --PLOT COMPLETE VOXEL GRID NEGATIVE/POSITIVE-- #
+        if (f_voxel_grid_complete_neg_pos == 1):
+            # Create point list
+            voxel_p_list = np.empty((0,4))
+            for i in range(voxel_grid.shape[0]):
+                for j in range(voxel_grid.shape[1]):
+                    for k in range(int(np.floor(voxel_grid.shape[2]/3)), int(np.floor(voxel_grid.shape[2]/3*2))):
+                        new_p = np.array([i, j, k, 1]) if voxel_grid[i][j][k] > 0 else np.array([i, j, k, 0])
+                        voxel_p_list = np.append(voxel_p_list,[new_p], axis=0)
+            
+            # Create a 3D plot
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+
+            # Plot points with colors based on values
+            ax.scatter(voxel_p_list[:, 0], voxel_p_list[:, 1], voxel_p_list[:, 2], c=voxel_p_list[:, 3], cmap='viridis', s=300)
+
+            # Set labels
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+
+            # Show plot
+            plt.show()
+
+
 
         # --PLOT OCCUPANCY GRID CUT-- #
         if (f_occupancy_grid_cut == 1):
