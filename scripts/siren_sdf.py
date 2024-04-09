@@ -519,10 +519,10 @@ def SIREN_Trainer(PC_msg):
         #return
         
         # --PRINT LIDAR POINTS-- #
-        if (f_print_lidar_points == 1):
-            fig_walls = go.Figure(data=[go.Scatter3d(x=wall_coordinates[:,0], y=wall_coordinates[:,1], z=wall_coordinates[:,2], mode='markers', marker=dict(size=5))])
-            fig_walls.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
-            fig_walls.show()
+        #if (f_print_lidar_points == 1):
+        #    fig_walls = go.Figure(data=[go.Scatter3d(x=wall_coordinates[:,0], y=wall_coordinates[:,1], z=wall_coordinates[:,2], mode='markers', marker=dict(size=5))])
+        #    fig_walls.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
+        #    fig_walls.show()
 
         training_points = np.empty((0,4)) # Reset the training points
 
