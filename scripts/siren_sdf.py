@@ -466,6 +466,9 @@ def PC_POS_callback_2topics(PC_msg, POS_msg):
     q2 = POS_msg.pose.orientation.y
     q3 = POS_msg.pose.orientation.z
     Q = np.array([q0, q1, q2, q3])
+    print("PC MESSAGE TIME: ",PC_msg.header.stamp)
+    print("POS MESSAGE TIME: ", POS_msg.header.stamp)
+    return
     SIREN_Trainer(PC_msg)
 
 def SIREN_Trainer(PC_msg):
