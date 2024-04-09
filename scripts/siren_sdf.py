@@ -12,15 +12,15 @@ from scipy.spatial import cKDTree
 import message_filters
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import time
+#import time
 
-import os
+#import os
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from siren_pytorch import SirenNet
-from torch.utils.data import DataLoader, TensorDataset
-from torchvision import datasets, transforms
+#import torch.optim as optim
+#from siren_pytorch import SirenNet
+#from torch.utils.data import DataLoader, TensorDataset
+#from torchvision import datasets, transforms
 
 import plotly.graph_objs as go
 
