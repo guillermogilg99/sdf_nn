@@ -12,6 +12,7 @@ from scipy.spatial import cKDTree
 import message_filters
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import time
 
 import os
 import torch
@@ -390,47 +391,49 @@ class SDFTrainer(): # Trainer class that gets called during training
         print('Dataset size:', self.dataset.pc_data.size())
         epoch = 0
 
-        sdf_tensor_dataset = TensorDataset(torch.tensor(self.dataset.pc_data, dtype=self.dtype), torch.tensor(self.dataset.sdf_data, dtype = self.dtype))
-        sdf_dataloader = DataLoader(sdf_tensor_dataset, batch_size = self.batch_size, shuffle = True)
+        #sdf_tensor_dataset = TensorDataset(torch.tensor(self.dataset.pc_data, dtype=self.dtype), torch.tensor(self.dataset.sdf_data, dtype = self.dtype))
+        #sdf_dataloader = DataLoader(sdf_tensor_dataset, batch_size = self.batch_size, shuffle = True)
         
-        #batch_points = self.dataset.pc_data
-        #batch_sdf = self.dataset.sdf_data
-        #batch_points.requires_grad_()
+        batch_points = self.dataset.pc_data
+        batch_sdf = self.dataset.sdf_data
+        batch_points.requires_grad_()
 
         while epoch < epochs:
-            epoch_loss = []
-            for batch_points, batch_sdf in sdf_dataloader:
+            #epoch_loss = []
+            #for batch_points, batch_sdf in sdf_dataloader:
 
-                batch_points.requires_grad_()
+            #batch_points.requires_grad_()
+        
+            self.optimizer.zero_grad()
+
+            # Compute SDF preds and targets
+            sdf_preds = self.model(batch_points)
+            target_sdf_preds = batch_sdf
+
+            # Compute grads
+            sdf_gradient_preds = torch.autograd.grad(outputs=sdf_preds,
+                                                        inputs=batch_points,
+                                                        grad_outputs=torch.ones_like(sdf_preds, requires_grad=False, device=sdf_preds.device),
+                                                        create_graph=True,
+                                                        retain_graph=True,
+                                                        only_inputs=True
+                                                        )[0]
             
-                self.optimizer.zero_grad()
+            # Compute loss
+            self.total_sdf_loss = sdf_loss(sdf_preds, target_sdf_preds)
+            self.total_eikonal_loss = eikonal_loss(sdf_gradient_preds)
+            self.total_loss = self.sdf_loss_weight * torch.mean(self.total_sdf_loss) + self.eikonal_loss_weight * torch.mean(self.total_eikonal_loss)
+            self.total_loss.backward()
 
-                # Compute SDF preds and targets
-                sdf_preds = self.model(batch_points)
-                target_sdf_preds = batch_sdf
+            # Update weights
+            self.optimizer.step()
 
-                # Compute grads
-                sdf_gradient_preds = torch.autograd.grad(outputs=sdf_preds,
-                                                            inputs=batch_points,
-                                                            grad_outputs=torch.ones_like(sdf_preds, requires_grad=False, device=sdf_preds.device),
-                                                            create_graph=True,
-                                                            retain_graph=True,
-                                                            only_inputs=True
-                                                            )[0]
-                
-                # Compute loss
-                self.total_sdf_loss = sdf_loss(sdf_preds, target_sdf_preds)
-                self.total_eikonal_loss = eikonal_loss(sdf_gradient_preds)
-                self.total_loss = self.sdf_loss_weight * torch.mean(self.total_sdf_loss) + self.eikonal_loss_weight * torch.mean(self.total_eikonal_loss)
-                self.total_loss.backward()
+            # Append loss
+            self.losses.append(self.total_sdf_loss.mean().detach().cpu().numpy())
+            #epoch_loss.append(self.total_loss)
+            #print('Training epoch ',epoch + 1,'/',epochs,'|| Loss:',torch.tensor(epoch_loss).mean())
+            print(f"Epoch: {epoch+1}/{epochs}, mean SDF loss: {torch.mean(self.total_sdf_loss)}, mean Eikonal loss: {torch.mean(self.total_eikonal_loss)}")
 
-                # Update weights
-                self.optimizer.step()
-
-                # Append loss
-                self.losses.append(self.total_sdf_loss.mean().detach().cpu().numpy())
-                epoch_loss.append(self.total_loss)
-            print('Training epoch ',epoch + 1,'/',epochs,'|| Loss:',torch.tensor(epoch_loss).mean())
             epoch = epoch + 1
 
         return self.losses[-1]
@@ -510,7 +513,11 @@ def SIREN_Trainer(PC_msg):
                 pointcount = pointcount + 1
         print("pointcount =", pointcount)
         print("wall_coordinates =", wall_coordinates)
-
+        # SANTI
+        #print("Total wall points: ", total_wall_point_list.shape[0])
+        #np.save('lidar_points.npy', total_wall_point_list)
+        #return
+        
         # --PRINT LIDAR POINTS-- #
         if (f_print_lidar_points == 1):
             fig_walls = go.Figure(data=[go.Scatter3d(x=wall_coordinates[:,0], y=wall_coordinates[:,1], z=wall_coordinates[:,2], mode='markers', marker=dict(size=5))])
