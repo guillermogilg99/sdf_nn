@@ -22,14 +22,14 @@ import torch.nn as nn
 #from torch.utils.data import DataLoader, TensorDataset
 #from torchvision import datasets, transforms
 
-#import plotly.graph_objs as go
+import plotly.graph_objs as go
 
 # Custom includes
 
 
 # ======== FLAGS ========
 
-f_print_lidar_points = 0
+f_print_lidar_points = 1
 f_voxel_grid_cut = 0
 f_occupancy_grid_cut = 0
 f_voxel_grid_complete = 0
@@ -314,8 +314,8 @@ class SIREN(nn.Module):
         return self.net(input)
 
 # Create the model
-#siren_model = SIREN(input_dim=3, hidden_dim=256, hidden_layers=4, output_dim=1, omega_0=10).to(device)
-siren_model = SIREN().to(device)
+
+#siren_model = SIREN().to(device)
 
 # ========= TRAINING DEFINITIONS =========
 class Dataset(torch.utils.data.Dataset): # Structure to save collected data
@@ -385,7 +385,7 @@ class SDFTrainer(): # Trainer class that gets called during training
 
     def update_dataset(self, new_data):
         self.dataset.update_dataset(new_data)
-    
+
 
     def training_step(self, epochs = 50):
         print('Dataset size:', self.dataset.pc_data.size())
@@ -453,10 +453,6 @@ global_sdf_trainer = SDFTrainer(
 
 def PC_POS_callback_2topics(PC_msg, POS_msg):
     print("Synchronized message")
-    #print("POS Seq: ", POS_msg.header.seq)
-    #print("POS Stamp: ", POS_msg.header.stamp)
-    #print("PC Seq: ", PC_msg.header.seq)
-    #print("PC Stamp: ", PC_msg.header.stamp)
     global x_pos, y_pos, z_pos, Q
     x_pos = POS_msg.pose.position.x
     y_pos = POS_msg.pose.position.y
@@ -466,10 +462,14 @@ def PC_POS_callback_2topics(PC_msg, POS_msg):
     q2 = POS_msg.pose.orientation.y
     q3 = POS_msg.pose.orientation.z
     Q = np.array([q0, q1, q2, q3])
-    print("PC MESSAGE TIME: ",PC_msg.header.stamp)
-    print("POS MESSAGE TIME: ", POS_msg.header.stamp)
-    return
+    #print("PC MESSAGE TIME: ",PC_msg.header.stamp)
+    #print("POS MESSAGE TIME: ", POS_msg.header.stamp)
     SIREN_Trainer(PC_msg)
+
+
+
+
+
 
 def SIREN_Trainer(PC_msg):
     #----------------Parameters------------------------------------------------------------------
@@ -511,21 +511,23 @@ def SIREN_Trainer(PC_msg):
             if((p[0]**2 + p[1]**2 + p[2]**2) < lidar_lim_max**2 and (p[0]**2 + p[1]**2 + p[2]**2) > lidar_lim_min**2): # Si está dentro del radio deseado, lo guarda como puntos de la pared
                 plocal = np.array([p[0], p[1], p[2]])
                 pglobal = drone_pos + R @ plocal
+                #pglobal = plocal
                 wall_coordinates =np.append(wall_coordinates, [pglobal], axis=0)
                 total_wall_point_list = np.append(total_wall_point_list, [pglobal], axis=0)
                 pointcount = pointcount + 1
         print("pointcount =", pointcount)
         print("wall_coordinates =", wall_coordinates)
-        # SANTI
+        
+        # BAGS SANTI
         #print("Total wall points: ", total_wall_point_list.shape[0])
         #np.save('lidar_points.npy', total_wall_point_list)
         #return
         
-        # --PRINT LIDAR POINTS-- #
-        #if (f_print_lidar_points == 1):
-        #    fig_walls = go.Figure(data=[go.Scatter3d(x=wall_coordinates[:,0], y=wall_coordinates[:,1], z=wall_coordinates[:,2], mode='markers', marker=dict(size=5))])
-        #    fig_walls.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z'))
-        #    fig_walls.show()
+        #--PRINT LIDAR POINTS-- #
+        if (f_print_lidar_points == 1):
+            fig_walls = go.Figure(data=[go.Scatter3d(x=wall_coordinates[:,0], y=wall_coordinates[:,1], z=wall_coordinates[:,2], mode='markers', marker=dict(size=5))])
+            fig_walls.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='manual', aspectratio=dict(x=1, y=1, z=1)))
+            fig_walls.show()
 
         training_points = np.empty((0,4)) # Reset the training points
 
@@ -728,8 +730,6 @@ def SIREN_Trainer(PC_msg):
             plt.grid(True)
             plt.show()
 
-
-
         # ----------------Entrenamiento de la SIREN--------------------------------------------------------------------------------
             
         # Training params
@@ -825,8 +825,8 @@ def SIREN_Trainer(PC_msg):
             #print(f'Epoch [{epoch + 1}/{num_epochs}] Loss: {running_loss / len(train_loader)}')
 
         # Save the trained model if needed
-        torch.save(siren_model.state_dict(), 'siren_model.pth')
-        print("Saved SIREN model")
+        #torch.save(siren_model.state_dict(), 'siren_model.pth')
+        #print("Saved SIREN model")
 
 
 
